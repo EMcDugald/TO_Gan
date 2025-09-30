@@ -1,4 +1,4 @@
-name: ndgm
+name: TO_Gan
 channels:
   - pytorch
   - nvidia
@@ -363,4 +363,4 @@ dependencies:
   - zlib=1.3.1
   - zstandard=0.23.0
   - zstd=1.5.6
-prefix: /home/mileva/mambaforge/envs/ndgm
+prefix: C:\Users\emcdugald\.conda\envs\TO_Gan
