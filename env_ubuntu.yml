@@ -1,4 +1,4 @@
-name: ndgm
+name: TO_Gan
 channels:
   - pytorch
   - nvidia
