@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.ndimage import label
+import os
 
 def compute_internal_void_volume(voxel_arr):
     empty_voxels = np.logical_not(voxel_arr)
@@ -18,11 +19,11 @@ def compute_internal_void_volume(voxel_arr):
             internal_void_volume += np.sum(labeled_voids == void_label)
     return internal_void_volume
 
-topo = np.load('data/topologies.npy', allow_pickle=True)
-shapes = np.load('data/shapes.npy', allow_pickle=True)
+topo = np.load(os.getcwd()+'/TO_3D_data_scratch/data/topologies.npy',allow_pickle=True)
+shapes = np.load(os.getcwd()+'/TO_3D_data_scratch/data/shapes.npy',allow_pickle=True)
 
 n_arrays = topo.shape[0]
-n_voxels_to_make = 100
+n_voxels_to_make = 10
 indices = np.arange(n_arrays)
 selected_indices = np.random.choice(indices, size=n_voxels_to_make, replace=False)
 
@@ -40,6 +41,6 @@ for idx in selected_indices:
     voxel_metric_label_tuples.append((voxel_arr, metric_val, label_val))
 
 # Save as object dtype array to handle mixed shapes and types
-np.save('labeled_voxels.npy', np.array(voxel_metric_label_tuples, dtype=object))
+np.save(os.getcwd()+'/TO_3D_data_scratch/data/labeled_voxels.npy', np.array(voxel_metric_label_tuples, dtype=object))
 
 print(f'Saved {len(voxel_metric_label_tuples)} labeled voxel structures to labeled_voxels.npy')

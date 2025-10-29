@@ -1,15 +1,16 @@
 import numpy as np
+import os
 
-topo = np.load('data/topologies.npy',allow_pickle=True)
+topo = np.load(os.getcwd()+'/TO_3D_data_scratch/data/topologies.npy',allow_pickle=True)
 print(topo.shape)
 
-shapes = np.load('data/shapes.npy',allow_pickle=True)
+shapes = np.load(os.getcwd()+'/TO_3D_data_scratch/data/shapes.npy',allow_pickle=True)
 print(shapes.shape)
 
 import trimesh
 # cd 'C:\Users\hdb\Documents\Research\ML RCP 2024\3DTopos'
 for count, ele in enumerate(topo):
-    if count<500 and count>99:
+    if count<100 and count>50:
         arr_3d = ele.reshape(shapes[count]).transpose()
         mcubes = trimesh.voxel.ops.matrix_to_marching_cubes(arr_3d, pitch=1)
         mesh_new=mcubes.split(only_watertight=True)
@@ -22,11 +23,11 @@ for count, ele in enumerate(topo):
                 face_count_biggest=len(mesh_new_big.faces)
                 biggest_body_count=count2
             mesh_new_big=mesh_new[biggest_body_count]
-        filename = f"stls/{count}.stl"
-        #print(filename)
+        filename = os.getcwd()+f"/TO_3D_data_scratch/stls/{count}.stl"
+        print(filename)
         mesh_new_big.export(filename)
 
-tst_mesh = trimesh.load('stls/100.stl')
+tst_mesh = trimesh.load(os.getcwd()+'/TO_3D_data_scratch/stls/60.stl')
 print("verts shape:",tst_mesh.vertices.shape)
 print("faces shape:",tst_mesh.faces.shape)
 tst_mesh.show()
