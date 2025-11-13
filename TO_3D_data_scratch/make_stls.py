@@ -10,7 +10,7 @@ print(shapes.shape)
 import trimesh
 # cd 'C:\Users\hdb\Documents\Research\ML RCP 2024\3DTopos'
 for count, ele in enumerate(topo):
-    if count<100 and count>50:
+    if count<20 and count>1:
         arr_3d = ele.reshape(shapes[count]).transpose()
         mcubes = trimesh.voxel.ops.matrix_to_marching_cubes(arr_3d, pitch=1)
         mesh_new=mcubes.split(only_watertight=True)
@@ -27,8 +27,8 @@ for count, ele in enumerate(topo):
         print(filename)
         mesh_new_big.export(filename)
 
-tst_mesh = trimesh.load(os.getcwd()+'/TO_3D_data_scratch/stls/60.stl')
+tst_mesh = trimesh.load(os.getcwd()+'/TO_3D_data_scratch/stls/19.stl')
 print("verts shape:",tst_mesh.vertices.shape)
 print("faces shape:",tst_mesh.faces.shape)
-tst_mesh.show()
+#tst_mesh.show()   #on hpc suppress this
 
