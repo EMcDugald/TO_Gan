@@ -21,25 +21,38 @@ def eval_dpp_div(batch):
         eig_val = np.ones(x.shape[0])
     loss = -np.mean(np.log(np.maximum(eig_val, 1e-10)))
     return loss
-def eval_batch_validity(batch):
-    
+
+
+def compute_relative_internal_void_volume(voxel_arr):
+    empty_voxels = np.logical_not(voxel_arr)
+    labeled_voids, num_features = label(empty_voxels)
+    border_labels = set()
+    # Identify void components touching the border
+    border_labels.update(np.unique(labeled_voids[0, :, :]))
+    border_labels.update(np.unique(labeled_voids[-1, :, :]))
+    border_labels.update(np.unique(labeled_voids[:, 0, :]))
+    border_labels.update(np.unique(labeled_voids[:, -1, :]))
+    border_labels.update(np.unique(labeled_voids[:, :, 0]))
+    border_labels.update(np.unique(labeled_voids[:, :, -1]))
+    border_labels.discard(0)
+    internal_void_volume = 0
+    for void_label in range(1, num_features + 1):
+        if void_label not in border_labels:
+            internal_void_volume += np.sum(labeled_voids == void_label)
+    total_volume = np.prod(voxel_arr.shape)  # total voxels in the part
+    relative_void_volume = internal_void_volume / total_volume
+    return relative_void_volume
+
+
+def eval_batch_validity_3d(batch, threshold=0.0):
     validity = []
-    all_areas = []
-    for i in range(len(batch)):
-        num_labels, _,b,_ = connectedComponentsWithStats((batch[i]<=128).astype(np.uint8), connectivity=8)
-        if num_labels <= 2:
-            tot_area=0
-        else:
-            areas = []
-            for i in range(1, num_labels):
-                area = b[i,-1]
-                areas.append(area)
-            areas = np.array(areas)
-            tot_area = sum(areas) - max(areas)
-        valid = num_labels == 2
-        validity.append(valid)
-        all_areas.append(tot_area)
-    return np.array(validity), np.array(all_areas)
+    all_void_volumes = []
+    for voxel_arr in batch:
+        relative_void_vol = compute_relative_internal_void_volume(voxel_arr)
+        is_valid = relative_void_vol <= threshold
+        validity.append(is_valid)
+        all_void_volumes.append(relative_void_vol)
+    return np.array(validity), np.array(all_void_volumes)
 
 def evaluate_n_batches(netG, device, nz, batches=1000, batch_size=128):
     with torch.no_grad():
@@ -112,52 +125,85 @@ def pad_voxel_tensors(voxel_tensors):
 
     return torch.stack(padded_tensors)
 
-def augment_all(data):
-    def augment(image):
-        return torch.stack([image, image.flip(0), image.flip(1), image.flip(0).flip(1), image.transpose(0, 1), image.transpose(0, 1).flip(0), image.transpose(0, 1).flip(1), image.transpose(0, 1).flip(0).flip(1)], 0)
-    return torch.cat([augment(data[i]) for i in range(data.shape[0])], 0)
+def augment_all_3d(data):
+    def augment(volume):
+        vols = []
+        # Original volume
+        vols.append(volume)
+        # Flips along X, Y, Z axes
+        vols.append(volume.flip(0))
+        vols.append(volume.flip(1))
+        vols.append(volume.flip(2))
+        # Combined flips
+        vols.append(volume.flip(0).flip(1))
+        vols.append(volume.flip(0).flip(2))
+        vols.append(volume.flip(1).flip(2))
+        vols.append(volume.flip(0).flip(1).flip(2))
+        # Transpose permutations (swapping dims)
+        vols.append(volume.permute(1, 0, 2))
+        vols.append(volume.permute(2, 1, 0))
+        vols.append(volume.permute(0, 2, 1))
+        vols.append(volume.permute(1, 2, 0))
+        vols.append(volume.permute(2, 0, 1))
+        vols.append(volume.permute(0, 1, 2))  # redundant with original but included for completeness
+
+        # Convert list to tensor stack along a new dim
+        return torch.stack(vols, dim=0)
+
+    augmented = [augment(data[i]) for i in range(data.shape[0])]
+    # Concatenate all augmented volumes into a batch (first dim is augmentation count)
+    return torch.cat(augmented, dim=0)
 
 
-class Generator(nn.Module):
+class Generator3D(nn.Module):
     def __init__(self, nz, ngf):
-        super(Generator, self).__init__()
+        super(Generator3D, self).__init__()
         self.main = nn.Sequential(
-            nn.ConvTranspose2d(nz, ngf * 8, 4, 1, 0, bias=False),
-            nn.BatchNorm2d(ngf * 8),
+            nn.ConvTranspose3d(nz, ngf * 8, 4, 1, 0, bias=False),
+            nn.BatchNorm3d(ngf * 8),
             nn.ReLU(True),
-            nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ngf * 4),
+
+            nn.ConvTranspose3d(ngf * 8, ngf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm3d(ngf * 4),
             nn.ReLU(True),
-            nn.ConvTranspose2d(ngf * 4, ngf * 2, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ngf * 2),
+
+            nn.ConvTranspose3d(ngf * 4, ngf * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm3d(ngf * 2),
             nn.ReLU(True),
-            nn.ConvTranspose2d(ngf * 2, ngf, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ngf),
+
+            nn.ConvTranspose3d(ngf * 2, ngf, 4, 2, 1, bias=False),
+            nn.BatchNorm3d(ngf),
             nn.ReLU(True),
-            nn.ConvTranspose2d(ngf, 1, 4, 2, 1, bias=False),
+
+            nn.ConvTranspose3d(ngf, 1, 4, 2, 1, bias=False),
             nn.Tanh()
         )
 
     def forward(self, input):
-        input = input.view(input.size(0), input.size(1), 1, 1)
+        input = input.view(input.size(0), input.size(1), 1, 1, 1)  # extra dim for 3D
         return self.main(input)
-    
-class Discriminator(nn.Module):
+
+
+class Discriminator3D(nn.Module):
     def __init__(self, ndf, nc):
-        super(Discriminator, self).__init__()
+        super(Discriminator3D, self).__init__()
         self.main = nn.Sequential(
-            nn.Conv2d(1, ndf, 4, 2, 1, bias=False),
+            nn.Conv3d(nc, ndf, 4, 2, 1, bias=False),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ndf * 2),
+
+            nn.Conv3d(ndf, ndf * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm3d(ndf * 2),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ndf * 4),
+
+            nn.Conv3d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm3d(ndf * 4),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ndf * 8),
+
+            nn.Conv3d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm3d(ndf * 8),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(ndf * 8, nc, 4, 1, 0, bias=False),
+
+            nn.Conv3d(ndf * 8, nc, 4, 1, 0, bias=False),
         )
 
     def forward(self, input):

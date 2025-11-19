@@ -344,6 +344,59 @@ def GAN_step_MDD(D, G, A, D_opt, G_opt, A_opt, P_batch, N_batch, noise_batch, ba
     return report
 
 
+def GAN_step_MDD_3d(D, G, A, D_opt, G_opt, A_opt, P_batch, N_batch, noise_batch, batch_size, device, validity_weight=None, diversity_weight=0):
+    criterion = nn.CrossEntropyLoss()
+    D.zero_grad()
+
+    t = torch.full((batch_size,), 2, dtype=torch.long, device=device)  # Negative class
+    o = torch.full((batch_size,), 1, dtype=torch.long, device=device)  # Positive class
+    z = torch.full((batch_size,), 0, dtype=torch.long, device=device)  # Fake class
+
+    # Discriminator real positive
+    output = D(P_batch)
+    L_D_real = criterion(output, o)
+
+    # Discriminator negative samples
+    output = D(N_batch)
+    L_D_neg = criterion(output, t)
+
+    # Discriminator fake
+    fake_data = G(noise_batch)
+    output = D(fake_data.detach())
+    L_D_fake = criterion(output, z)
+
+    L_D_tot = L_D_real + L_D_fake + L_D_neg
+    L_D_tot.backward()
+    D_opt.step()
+
+    # Generator update
+    G.zero_grad()
+    fake_data = G(noise_batch)
+    output = D(fake_data)
+    L_G = criterion(output, o)
+
+    if diversity_weight > 0:
+        # Assume you implement a suitable 3D diversity loss
+        L_div = diversity_loss(fake_data)
+        L_G_tot = L_G + diversity_weight * L_div
+    else:
+        L_G_tot = L_G
+        L_div = None
+
+    L_G_tot.backward()
+    G_opt.step()
+
+    report = {"L_D_real": L_D_real.item(),
+              "L_D_neg": L_D_neg.item(),
+              "L_D_fake": L_D_fake.item(),
+              "L_G": L_G.item()}
+    if L_div is not None:
+        report["L_div"] = L_div.item()
+
+    return report
+
+
+
 def VAE_step_vanilla(D, G, A, D_opt, G_opt, A_opt, P_batch, N_batch, noise_batch, batch_size, device, validity_weight=None, diversity_weight=0):
     
     D.zero_grad()
