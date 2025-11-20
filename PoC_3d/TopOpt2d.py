@@ -77,6 +77,26 @@ def augment_all(data):
     return torch.cat([augment(data[i]) for i in range(data.shape[0])], 0)
 
 
+def diversity_loss(x):
+    # Compute pairwise squared Euclidean distances
+    r = torch.sum(x ** 2, dim=1, keepdim=True)
+    D = r - 2 * torch.matmul(x, x.T) + r.T
+    
+    # Compute the similarity matrix using RBF
+    S = torch.exp(-0.5 * D ** 2)
+    
+    # Compute the eigenvalues of the similarity matrix
+    try:
+        eig_val = torch.linalg.eigvalsh(S)
+    except:
+        eig_val = torch.ones(x.size(0), device=x.device)
+    
+    # Compute the loss as the negative mean log of the eigenvalues
+    loss = -torch.mean(torch.log(torch.clamp(eig_val, min=1e-7)))
+    
+    return loss
+
+
 
 def GAN_step_MDD(D, G, A, D_opt, G_opt, A_opt, P_batch, N_batch, noise_batch, batch_size, device, validity_weight=None, diversity_weight=0):
     criterion = nn.CrossEntropyLoss()
