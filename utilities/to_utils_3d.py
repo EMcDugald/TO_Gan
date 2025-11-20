@@ -7,6 +7,7 @@ from tqdm import tqdm, trange
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 import torchvision.transforms as transforms
+from scipy.ndimage import label
 
 def eval_dpp_div(batch):
     batch = batch<=128

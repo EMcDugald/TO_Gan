@@ -3,14 +3,17 @@ import os
 import imageio
 import matplotlib.pyplot as plt
 
-os.makedirs(os.getcwd()+'/TO_3D_data_scratch/labeled_voxel_figs', exist_ok=True)
+#os.makedirs(os.getcwd()+'/TO_3D_data_scratch/labeled_voxel_figs', exist_ok=True)
+os.makedirs(os.getcwd()+'/TO_3D_data_scratch/labeled_voxel_figs_323232', exist_ok=True)
 
 # Load labeled voxel data (tuples of (voxel_array, metric, label))
-data = np.load(os.getcwd()+'/TO_3D_data_scratch/data/labeled_voxels.npy', allow_pickle=True)
+data = np.load(os.getcwd()+'/TO_3D_data_scratch/data/labeled_voxels_32x32x32.npy', allow_pickle=True)
+
 
 for i, (voxel_arr, metric, label_val) in enumerate(data):
     label_str = 'positive' if label_val == 1 else 'negative'
-    base_filename = os.getcwd()+f'/TO_3D_data_scratch/labeled_voxel_figs/voxel_{i}_{label_str}'
+    #base_filename = os.getcwd()+f'/TO_3D_data_scratch/labeled_voxel_figs/voxel_{i}_{label_str}'
+    base_filename = os.getcwd()+f'/TO_3D_data_scratch/labeled_voxel_figs_323232/voxel_{i}_{label_str}'
 
     # Save GIF animation of slices
     images = []
