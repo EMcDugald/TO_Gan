@@ -276,11 +276,7 @@ def plot_voxel_grid_3d(voxel_grid, title="", save_path=None):
         plt.savefig(save_path, bbox_inches='tight')
     plt.close(fig)
 
-# --------------------------
-# Execution script (not __main__)
-# --------------------------
 
-# === You may adjust these variables for your setup ===
 data_path = "./TO_3D_data_scratch/data/labeled_voxels_32x32x32.npy"
 batch_size = 8
 nz = 100
@@ -288,7 +284,6 @@ ngf = 32
 ndf = 32
 num_epochs = 1
 
-# Load, shuffle, and subsample for debugging
 P, N = load_data_3d(data_path)
 n_samples = min(len(P), len(N))
 P = P[:n_samples]

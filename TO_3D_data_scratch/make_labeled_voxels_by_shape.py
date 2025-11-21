@@ -40,8 +40,8 @@ def generate_voxels_for_shape(shape_tuple, n_samples, topo, shapes, threshold=0.
 
 if __name__ == "__main__":
     # Adjust these paths as needed
-    topo = np.load('./TO_3D_data_scratch/data/topologies.npy', allow_pickle=True)
-    shapes = np.load('./TO_3D_data_scratch/data/shapes.npy', allow_pickle=True)
+    topo = np.load('./data/topologies.npy', allow_pickle=True)
+    shapes = np.load('./data/shapes.npy', allow_pickle=True)
 
     unique_shapes = set(tuple(shape) for shape in shapes)
     print("Unique shapes detected:", unique_shapes)
@@ -53,7 +53,7 @@ if __name__ == "__main__":
     target_shape = (32,32,32)
     n_voxels_to_make = 100
     void_threshold = 0.0
-    output_dir = './TO_3D_data_scratch/data/'
+    output_dir = './data/'
 
     if target_shape is None:
         for shape_tuple in unique_shapes:
