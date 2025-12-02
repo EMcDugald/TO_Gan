@@ -9,6 +9,22 @@ from torch.utils.data import DataLoader, Dataset
 import torchvision.transforms as transforms
 from scipy.ndimage import label
 
+def eval_dpp_div_3d(batch):
+    # batch: [B, D, H, W] or [B, 1, D, H, W]
+    if batch.ndim == 5:
+        batch = batch[:, 0]  # remove channel
+    batch = (batch <= 0).astype(np.float64)
+    x = batch.reshape(batch.shape[0], -1) / np.sqrt(batch[0].size)
+    r = np.sum(np.square(x), axis=1, keepdims=True)
+    D = r - 2 * np.dot(x, x.T) + r.T
+    S = np.exp(-0.5 * np.square(D))
+    try:
+        eig_val, _ = np.linalg.eigh(S)
+    except:
+        eig_val = np.ones(x.shape[0])
+    loss = -np.mean(np.log(np.maximum(eig_val, 1e-10)))
+    return loss
+
 
 class DataNotFoundError(Exception):
     pass
@@ -120,6 +136,22 @@ class Discriminator3d(nn.Module):
         )
     def forward(self, input):
         return self.main(input).view(input.size(0), -1)
+    
+def diversity_loss_3d(x):
+    # x: shape [batch_size, 1, D, H, W] (or [batch_size, D, H, W])
+    if x.ndim == 5:  # [B, 1, D, H, W]
+        x = x[:, 0]
+    x = x.view(x.size(0), -1)
+    # The rest matches your 2D loss
+    r = torch.sum(x ** 2, dim=1, keepdim=True)
+    D = r - 2 * torch.matmul(x, x.T) + r.T
+    S = torch.exp(-0.5 * D ** 2)
+    try:
+        eig_val = torch.linalg.eigvalsh(S)
+    except:
+        eig_val = torch.ones(x.size(0), device=x.device)
+    loss = -torch.mean(torch.log(torch.clamp(eig_val, min=1e-7)))
+    return loss
     
 
 def evaluate_n_batches_3d(netG, device, nz, batches=100, batch_size=8):

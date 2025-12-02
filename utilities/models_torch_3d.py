@@ -4,6 +4,22 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 import numpy as np
 
+# def diversity_loss_3d(x):
+#     # x: shape [batch_size, 1, D, H, W] (or [batch_size, D, H, W])
+#     if x.ndim == 5:  # [B, 1, D, H, W]
+#         x = x[:, 0]
+#     x = x.view(x.size(0), -1)
+#     # The rest matches your 2D loss
+#     r = torch.sum(x ** 2, dim=1, keepdim=True)
+#     D = r - 2 * torch.matmul(x, x.T) + r.T
+#     S = torch.exp(-0.5 * D ** 2)
+#     try:
+#         eig_val = torch.linalg.eigvalsh(S)
+#     except:
+#         eig_val = torch.ones(x.size(0), device=x.device)
+#     loss = -torch.mean(torch.log(torch.clamp(eig_val, min=1e-7)))
+#     return loss
+
 
 def GAN_step_MDD_3d(D, G, A, D_opt, G_opt, A_opt, P_batch, N_batch, noise_batch, batch_size, device, validity_weight=None, diversity_weight=0):
     criterion = nn.CrossEntropyLoss()

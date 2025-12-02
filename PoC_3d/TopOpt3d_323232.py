@@ -214,16 +214,51 @@ def GAN_step_MDD_3d(D, G, A, D_opt, G_opt, A_opt, P_batch, N_batch, noise_batch,
 # Training loop (as 2D)
 # -------------------------
 
-def train_3d(D, G, A, D_opt, G_opt, A_opt, P_loader, N_loader, num_steps, batch_size, noise_dim, train_step_fn, device, validity_weight, diversity_weight=0):
+# def train_3d(D, G, A, D_opt, G_opt, A_opt, P_loader, N_loader, num_steps, batch_size, noise_dim, train_step_fn, device, validity_weight, diversity_weight=0):
+#     steps_range = trange(num_steps, position=0, leave=True)
+#     for step in steps_range:
+#         P_batch = P_loader.get_batch().to(device)
+#         N_batch = N_loader.get_batch().to(device)
+#         noise_batch = torch.randn(batch_size, noise_dim, device=device)
+#         report = train_step_fn(D, G, A, D_opt, G_opt, A_opt, P_batch, N_batch, noise_batch, batch_size, device, validity_weight=validity_weight, diversity_weight=diversity_weight)
+#         postfix = {key: "{:.4f}".format(value) for key, value in report.items()}
+#         steps_range.set_postfix(postfix)
+#     return D, G, A
+
+def train_3d(D, G, A, D_opt, G_opt, A_opt,
+             P_loader, N_loader,
+             num_steps, batch_size, noise_dim,
+             train_step_fn, device,
+             validity_weight, diversity_weight=0,
+             checkpoint_dir=None, ckpt_interval=1000):
+
     steps_range = trange(num_steps, position=0, leave=True)
     for step in steps_range:
         P_batch = P_loader.get_batch().to(device)
         N_batch = N_loader.get_batch().to(device)
         noise_batch = torch.randn(batch_size, noise_dim, device=device)
-        report = train_step_fn(D, G, A, D_opt, G_opt, A_opt, P_batch, N_batch, noise_batch, batch_size, device, validity_weight=validity_weight, diversity_weight=diversity_weight)
+
+        report = train_step_fn(D, G, A, D_opt, G_opt, A_opt,
+                               P_batch, N_batch, noise_batch,
+                               batch_size, device,
+                               validity_weight=validity_weight,
+                               diversity_weight=diversity_weight)
+
         postfix = {key: "{:.4f}".format(value) for key, value in report.items()}
         steps_range.set_postfix(postfix)
+
+        # checkpoint every ckpt_interval steps
+        if checkpoint_dir is not None and (step + 1) % ckpt_interval == 0:
+            ckpt_path = os.path.join(checkpoint_dir, f"ckpt_step_{step+1}.pt")
+            save_checkpoint(step + 1, G, D, G_opt, D_opt, ckpt_path)
+
+    # final checkpoint
+    if checkpoint_dir is not None:
+        ckpt_path = os.path.join(checkpoint_dir, f"ckpt_final.pt")
+        save_checkpoint(num_steps, G, D, G_opt, D_opt, ckpt_path)
+
     return D, G, A
+
 
 # -------------------------
 # Evaluation
@@ -263,7 +298,22 @@ def plot_voxel_grid_3d(voxel_grid, title="", save_path=None):
     plt.close(fig)
 
 
-data_path = "./TO_3D_data_scratch/data/labeled_voxels_32x32x32.npy"
+def save_checkpoint(step, netG, netD, G_opt, D_opt, path):
+    torch.save(
+        {
+            "step": step,
+            "netG_state": netG.state_dict(),
+            "netD_state": netD.state_dict(),
+            "G_opt_state": G_opt.state_dict(),
+            "D_opt_state": D_opt.state_dict(),
+        },
+        path,
+    )
+
+
+
+
+data_path = "/xdisk/emcdugald/to_gan/train_data/323232/labeled_voxels_32x32x32.npy"
 batch_size = 8
 nz = 100
 ngf = 32
@@ -298,9 +348,31 @@ num_steps = num_epochs * len(P) // batch_size
 D_opt = optim.Adam(netD.parameters(), lr=0.0002, betas=(0.5, 0.999))
 G_opt = optim.Adam(netG.parameters(), lr=0.0002, betas=(0.5, 0.999))
 
-# Training loop
+# # Training loop
+# netD, netG, _ = train_3d(
+#     netD, netG, None, D_opt, G_opt, None, P_loader, N_loader, num_steps, batch_size, nz, GAN_step_MDD_3d, device, 1, 0
+# )
+
+### To continue fro a checkpoint: 
+# ckpt = torch.load("/xdisk/emcdugald/to_gan/checkpoints_323232/ckpt_final.pt", map_location=device)
+# netG.load_state_dict(ckpt["netG_state"])
+# netD.load_state_dict(ckpt["netD_state"])
+# G_opt.load_state_dict(ckpt["G_opt_state"])
+# D_opt.load_state_dict(ckpt["D_opt_state"])
+# start_step = ckpt["step"]
+
+checkpoint_dir = "/xdisk/emcdugald/to_gan/checkpoints_323232"
+os.makedirs(checkpoint_dir, exist_ok=True)
+
 netD, netG, _ = train_3d(
-    netD, netG, None, D_opt, G_opt, None, P_loader, N_loader, num_steps, batch_size, nz, GAN_step_MDD_3d, device, 1, 0
+    netD, netG, None,
+    D_opt, G_opt, None,
+    P_loader, N_loader,
+    num_steps, batch_size, nz,
+    GAN_step_MDD_3d, device,
+    validity_weight=1, diversity_weight=0,
+    checkpoint_dir=checkpoint_dir,
+    ckpt_interval=1000,
 )
 
 # Generate and plot a batch of fake samples
