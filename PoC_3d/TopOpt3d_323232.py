@@ -80,7 +80,8 @@ def eval_batch_validity_3d(batch):
         total_volume = np.prod(voxel_arr.shape)
         relative_void_volume = internal_void_volume / total_volume
         # Label sample as valid if no significant internal voids (same as in your data-prep)
-        valid = relative_void_volume <= 0.0
+        # valid = relative_void_volume <= 0.0
+        valid = relative_void_volume <= 1e-8
         validity.append(valid)
         all_areas.append(internal_void_volume)
     return np.array(validity), np.array(all_areas)
@@ -225,12 +226,61 @@ def GAN_step_MDD_3d(D, G, A, D_opt, G_opt, A_opt, P_batch, N_batch, noise_batch,
 #         steps_range.set_postfix(postfix)
 #     return D, G, A
 
+# def train_3d(D, G, A, D_opt, G_opt, A_opt,
+#              P_loader, N_loader,
+#              num_steps, batch_size, noise_dim,
+#              train_step_fn, device,
+#              validity_weight, diversity_weight=0,
+#              checkpoint_dir=None, ckpt_interval=1000):
+
+#     steps_range = trange(num_steps, position=0, leave=True)
+#     for step in steps_range:
+#         P_batch = P_loader.get_batch().to(device)
+#         N_batch = N_loader.get_batch().to(device)
+#         noise_batch = torch.randn(batch_size, noise_dim, device=device)
+
+#         report = train_step_fn(D, G, A, D_opt, G_opt, A_opt,
+#                                P_batch, N_batch, noise_batch,
+#                                batch_size, device,
+#                                validity_weight=validity_weight,
+#                                diversity_weight=diversity_weight)
+
+#         postfix = {key: "{:.4f}".format(value) for key, value in report.items()}
+#         steps_range.set_postfix(postfix)
+
+#         # checkpoint every ckpt_interval steps
+#         if checkpoint_dir is not None and (step + 1) % ckpt_interval == 0:
+#             ckpt_path = os.path.join(checkpoint_dir, f"ckpt_step_{step+1}.pt")
+#             save_checkpoint(step + 1, G, D, G_opt, D_opt, ckpt_path)
+
+#     # final checkpoint
+#     if checkpoint_dir is not None:
+#         ckpt_path = os.path.join(checkpoint_dir, f"ckpt_final.pt")
+#         save_checkpoint(num_steps, G, D, G_opt, D_opt, ckpt_path)
+
+#     return D, G, A
+
+import csv
+
 def train_3d(D, G, A, D_opt, G_opt, A_opt,
              P_loader, N_loader,
              num_steps, batch_size, noise_dim,
              train_step_fn, device,
              validity_weight, diversity_weight=0,
-             checkpoint_dir=None, ckpt_interval=1000):
+             checkpoint_dir=None, ckpt_interval=None):
+    # Best-model tracking (by generator loss)
+    best_G_loss = float("inf")
+    best_ckpt_path = None
+
+    # Metrics logging
+    metrics_file = None
+    metrics_writer = None
+    if checkpoint_dir is not None:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        metrics_path = os.path.join(checkpoint_dir, "metrics.csv")
+        metrics_file = open(metrics_path, "w", newline="")
+        metrics_writer = csv.writer(metrics_file)
+        metrics_writer.writerow(["step", "L_D_real", "L_D_neg", "L_D_fake", "L_G"])
 
     steps_range = trange(num_steps, position=0, leave=True)
     for step in steps_range:
@@ -238,24 +288,50 @@ def train_3d(D, G, A, D_opt, G_opt, A_opt,
         N_batch = N_loader.get_batch().to(device)
         noise_batch = torch.randn(batch_size, noise_dim, device=device)
 
-        report = train_step_fn(D, G, A, D_opt, G_opt, A_opt,
-                               P_batch, N_batch, noise_batch,
-                               batch_size, device,
-                               validity_weight=validity_weight,
-                               diversity_weight=diversity_weight)
+        report = train_step_fn(
+            D, G, A, D_opt, G_opt, A_opt,
+            P_batch, N_batch, noise_batch,
+            batch_size, device,
+            validity_weight=validity_weight,
+            diversity_weight=diversity_weight,
+        )
 
+        # tqdm display
         postfix = {key: "{:.4f}".format(value) for key, value in report.items()}
         steps_range.set_postfix(postfix)
 
-        # checkpoint every ckpt_interval steps
-        if checkpoint_dir is not None and (step + 1) % ckpt_interval == 0:
-            ckpt_path = os.path.join(checkpoint_dir, f"ckpt_step_{step+1}.pt")
-            save_checkpoint(step + 1, G, D, G_opt, D_opt, ckpt_path)
+        # Log metrics
+        if metrics_writer is not None:
+            metrics_writer.writerow([
+                step + 1,
+                report.get("L_D_real", float("nan")),
+                report.get("L_D_neg", float("nan")),
+                report.get("L_D_fake", float("nan")),
+                report.get("L_G", float("nan")),
+            ])
 
-    # final checkpoint
+        # Best-checkpoint logic (based on generator loss)
+        current_G_loss = report.get("L_G", None)
+        if checkpoint_dir is not None and current_G_loss is not None:
+            if current_G_loss < best_G_loss:
+                best_G_loss = current_G_loss
+                best_ckpt_path = os.path.join(checkpoint_dir, "ckpt_best.pt")
+                save_checkpoint(step + 1, G, D, G_opt, D_opt, best_ckpt_path)
+
+        # Periodic checkpoints every ckpt_interval steps
+        if checkpoint_dir is not None and ckpt_interval is not None:
+            if (step + 1) % ckpt_interval == 0:
+                ckpt_path = os.path.join(checkpoint_dir, f"ckpt_step_{step+1}.pt")
+                save_checkpoint(step + 1, G, D, G_opt, D_opt, ckpt_path)
+
+    # Final checkpoint
     if checkpoint_dir is not None:
-        ckpt_path = os.path.join(checkpoint_dir, f"ckpt_final.pt")
+        ckpt_path = os.path.join(checkpoint_dir, "ckpt_final.pt")
         save_checkpoint(num_steps, G, D, G_opt, D_opt, ckpt_path)
+
+    # Close metrics file if open
+    if metrics_file is not None:
+        metrics_file.close()
 
     return D, G, A
 
@@ -310,15 +386,20 @@ def save_checkpoint(step, netG, netD, G_opt, D_opt, path):
         path,
     )
 
+#data_path = "/xdisk/hdb/emcdugald/to_gan/train_data/323232/2000_labeled_voxels_32x32x32.npy"
+#data_path = "/xdisk/hdb/emcdugald/to_gan/train_data/323232/5000_labeled_voxels_32x32x32.npy"
+data_path = "/xdisk/hdb/emcdugald/to_gan/train_data/323232/10000_labeled_voxels_32x32x32.npy"
+# batch_size = 8
+# nz = 100
+# ngf = 64
+# ndf = 64
+# num_epochs = 2500
 
-
-
-data_path = "/xdisk/emcdugald/to_gan/train_data/323232/labeled_voxels_32x32x32.npy"
-batch_size = 8
-nz = 100
-ngf = 32
-ndf = 32
-num_epochs = 1
+batch_size = 16
+nz = 200
+ngf = 96
+ndf = 96
+num_epochs = 5000
 
 P, N = load_data_3d(data_path)
 n_samples = min(len(P), len(N))
@@ -361,8 +442,12 @@ G_opt = optim.Adam(netG.parameters(), lr=0.0002, betas=(0.5, 0.999))
 # D_opt.load_state_dict(ckpt["D_opt_state"])
 # start_step = ckpt["step"]
 
-checkpoint_dir = "/xdisk/emcdugald/to_gan/checkpoints_323232"
+checkpoint_dir = "/xdisk/hdb/emcdugald/to_gan/checkpoints_323232"
 os.makedirs(checkpoint_dir, exist_ok=True)
+
+steps_per_epoch = len(P) // batch_size
+ckpt_epochs = 100
+ckpt_interval = ckpt_epochs * steps_per_epoch
 
 netD, netG, _ = train_3d(
     netD, netG, None,
@@ -372,7 +457,7 @@ netD, netG, _ = train_3d(
     GAN_step_MDD_3d, device,
     validity_weight=1, diversity_weight=0,
     checkpoint_dir=checkpoint_dir,
-    ckpt_interval=1000,
+    ckpt_interval=ckpt_interval,
 )
 
 # Generate and plot a batch of fake samples
