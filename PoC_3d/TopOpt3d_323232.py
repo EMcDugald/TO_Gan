@@ -395,11 +395,11 @@ data_path = "/xdisk/hdb/emcdugald/to_gan/train_data/323232/10000_labeled_voxels_
 # ndf = 64
 # num_epochs = 2500
 
-batch_size = 16
+batch_size = 8
 nz = 200
 ngf = 96
 ndf = 96
-num_epochs = 5000
+num_epochs = 2000
 
 P, N = load_data_3d(data_path)
 n_samples = min(len(P), len(N))
@@ -442,7 +442,7 @@ G_opt = optim.Adam(netG.parameters(), lr=0.0002, betas=(0.5, 0.999))
 # D_opt.load_state_dict(ckpt["D_opt_state"])
 # start_step = ckpt["step"]
 
-checkpoint_dir = "/xdisk/hdb/emcdugald/to_gan/checkpoints_323232"
+checkpoint_dir = "/xdisk/hdb/emcdugald/to_gan/checkpoints_323232_3k"
 os.makedirs(checkpoint_dir, exist_ok=True)
 
 steps_per_epoch = len(P) // batch_size

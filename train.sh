@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=gan3d_5k
+#SBATCH --job-name=gan3d_3k
 #SBATCH --account=hdb
 #SBATCH --partition=gpu_standard
 #SBATCH --nodes=1
@@ -8,7 +8,7 @@
 #SBATCH --mem=16G
 #SBATCH --gres=gpu:1
 #SBATCH --time=12:00:00
-#SBATCH --output=gan3d_5k_%j.out
+#SBATCH --output=gan3d_3k_%j.out
 
 module load cuda11         
 module load anaconda

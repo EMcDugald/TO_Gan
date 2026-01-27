@@ -10,7 +10,7 @@ print(shapes.shape)
 import trimesh
 # cd 'C:\Users\hdb\Documents\Research\ML RCP 2024\3DTopos'
 for count, ele in enumerate(topo):
-    if count<30 and count>21:
+    if count<100 and count>21:
         arr_3d = ele.reshape(shapes[count]).transpose()
         mcubes = trimesh.voxel.ops.matrix_to_marching_cubes(arr_3d, pitch=1)
         mesh_new=mcubes.split(only_watertight=True)
