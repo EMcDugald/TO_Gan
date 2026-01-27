@@ -34,9 +34,23 @@ def generate_voxels_for_shape(shape_tuple, n_samples, topo, shapes, threshold=0.
         rel_void = compute_relative_internal_void_volume(voxel_arr)
         label_val = 1 if rel_void <= threshold else 0
         results.append((voxel_arr, rel_void, label_val))
-    fname = f'{n_samples}_labeled_voxels_{shape_tuple[0]}x{shape_tuple[1]}x{shape_tuple[2]}.npy'
+    # NEW: compute positive / negative counts
+    labels = [lbl for (_, _, lbl) in results]
+    n_pos = sum(labels)
+    n_neg = len(labels) - n_pos
+    # fname = f'{n_samples}_labeled_voxels_{shape_tuple[0]}x{shape_tuple[1]}x{shape_tuple[2]}.npy'
+    # np.save(os.path.join(outdir, fname), np.array(results, dtype=object))
+    # print(f"Saved {len(results)} labeled voxel structures of shape {shape_tuple} to {fname}")
+    fname = (
+        f'{n_samples}_labeled_voxels_'
+        f'{shape_tuple[0]}x{shape_tuple[1]}x{shape_tuple[2]}_'
+        f'thr{threshold:.1e}.npy'
+        )
     np.save(os.path.join(outdir, fname), np.array(results, dtype=object))
-    print(f"Saved {len(results)} labeled voxel structures of shape {shape_tuple} to {fname}")
+    print(
+        f"Saved {len(results)} labeled voxel structures of shape {shape_tuple} "
+        f"to {fname} (threshold={threshold:.1e}, pos={n_pos}, neg={n_neg})"
+        )
 
 if __name__ == "__main__":
     # Adjust these paths as needed
@@ -48,7 +62,8 @@ if __name__ == "__main__":
 
     target_shape = (32, 32, 32)
     n_voxels_to_make = 10000
-    void_threshold = 1e-8
+    #void_threshold = 1e-8
+    void_threshold = 1e-6
 
     # NEW: set xdisk output dir and create it
     output_dir = "/xdisk/hdb/emcdugald/to_gan/train_data/323232"
