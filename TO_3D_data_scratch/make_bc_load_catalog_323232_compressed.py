@@ -16,7 +16,7 @@ TARGET_SHAPE = (32, 32, 32)
 MAX_TOTAL_PLOTS = 500      # upper bound on total images
 N_REP_PER_BIN = 5          # images per selected bin
 
-N_LOAD_MAG_BINS = 20        # 5–10 is reasonable; change as desired
+N_LOAD_MAG_BINS = 50        # 5–10 is reasonable; change as desired
 
 os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
@@ -208,6 +208,21 @@ def main():
             out_png = os.path.join(group_dir, f"voxel_{idx}_rep{j}.png")
             title = f"idx={idx}, shape={shape}"
             plot_voxel(voxel_arr, out_png, title=title)
+
+        # -----------------------------
+        # Plot load‑magnitude distribution
+        # -----------------------------
+        plt.figure()
+        plt.hist(mags, bins=50, density=False, alpha=0.7, edgecolor="k")
+        plt.xlabel("Load magnitude")
+        plt.ylabel("Count")
+        plt.title("Distribution of load magnitudes (32×32×32 subset)")
+        plt.tight_layout()
+
+        mag_hist_path = os.path.join(OUTPUT_ROOT, "load_magnitude_histogram.png")
+        plt.savefig(mag_hist_path, dpi=200)
+        plt.close()
+        print(f"Saved load‑magnitude histogram to {mag_hist_path}")
 
     print(f"Compressed catalog written under {OUTPUT_ROOT}")
 

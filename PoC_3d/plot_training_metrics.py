@@ -7,7 +7,9 @@ import numpy as np
 import re
 
 # Option 1: Hardcode your directory here (no CLI args needed)
-HARD_CODED_DIR = "/xdisk/hdb/emcdugald/to_gan/checkpoints_323232_10k/epochs2000_bs8_nz200_ngf96_ndf96_nsamp2245_20251210-155524"
+#HARD_CODED_DIR = "/xdisk/hdb/emcdugald/to_gan/checkpoints_323232_10k/epochs2000_bs8_nz200_ngf96_ndf96_nsamp2245_20251210-155524"
+HARD_CODED_DIR = "/xdisk/hdb/emcdugald/to_gan/checkpoints_323232_10k/epochs2000_bs8_nz200_ngf128_ndf128_nsamp2208_thr1.0e-06_20260203-151724"
+
 
 def parse_steps_per_epoch(dirname):
     """Extract batch_size and n_samples from directory name."""

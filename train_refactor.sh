@@ -12,11 +12,11 @@
 
 module load cuda11
 module load anaconda
-eval "$(conda shell.bash hook)"
-conda activate to_gan
 
-echo "which python: $(which python)"
-python -c "import sys; print('sys.executable:', sys.executable)"
-python -c "import torch; print('torch version in job:', torch.__version__)"
+PYTHON="$HOME/.conda/envs/to_gan/bin/python"
 
-python PoC_3d/TopOpt3d_323232_refactor.py
+echo "which python: $PYTHON"
+$PYTHON -c "import sys; print('sys.executable:', sys.executable)"
+$PYTHON -c "import torch; print('torch version in job:', torch.__version__)"
+
+$PYTHON PoC_3d/TopOpt3d_323232_refactor.py
