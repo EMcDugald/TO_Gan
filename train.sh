@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=gan3d_3k
+#SBATCH --job-name=gan3d_10k
 #SBATCH --account=hdb
 #SBATCH --partition=gpu_standard
 #SBATCH --nodes=1
@@ -8,13 +8,15 @@
 #SBATCH --mem=16G
 #SBATCH --gres=gpu:1
 #SBATCH --time=12:00:00
-#SBATCH --output=gan3d_3k_%j.out
+#SBATCH --output=gan3d_10k_%j.out
 
-module load cuda11         
+module load cuda11
 module load anaconda
 
-source ~/.bashrc
+PYTHON="$HOME/.conda/envs/to_gan/bin/python"
 
-conda activate to_gan  
+echo "which python: $PYTHON"
+$PYTHON -c "import sys; print('sys.executable:', sys.executable)"
+$PYTHON -c "import torch; print('torch version in job:', torch.__version__)"
 
-python PoC_3d/TopOpt3d_323232.py
+$PYTHON PoC_3d/TopOpt3d_323232.py
