@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=16G
 #SBATCH --gres=gpu:1
-#SBATCH --time=12:00:00
+#SBATCH --time=16:00:00
 #SBATCH --output=cgan3d_10k_%j.out
 
 module load cuda11

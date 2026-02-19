@@ -187,10 +187,14 @@ def generate_voxels_for_shape_conditional(
     c_norm = 1.0 - c_raw_norm
 
     # Composite score and median cutoff
-    score = 0.5 * m_norm + 0.5 * c_norm
-    cutoff = np.median(score)
+    #score = 0.5 * m_norm + 0.5 * c_norm
+    #cutoff = np.median(score)
+    #print("Composite score stats: min", float(score.min()),
+    #      "max", float(score.max()), "median", float(cutoff))
+
+    cutoff = np.quantile(score, 0.8)  # or 0.75, etc.
     print("Composite score stats: min", float(score.min()),
-          "max", float(score.max()), "median", float(cutoff))
+      "max", float(score.max()), "q=0.8 cutoff", float(cutoff))
 
     # Bin edges for mag / mass / compactness (for condition bins)
     mag_edges  = compute_bin_edges(mags,       n_mag_bins)
