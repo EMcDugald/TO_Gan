@@ -6,7 +6,8 @@ import numpy as np
 import re
 
 # Hardcode a conditional-GAN run here if you like
-HARD_CODED_DIR = "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k/epochs2000_bs8_nz200_ngf128_ndf128_nsamp10000_20260212-XXXXXX"
+#HARD_CODED_DIR = "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k/epochs2000_bs8_nz200_ngf128_ndf128_nsamp10000_20260212-XXXXXX"
+HARD_CODED_DIR = "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k/epochs1000_bs32_nz200_ngf128_ndf128_nsamp5000_20260219-155218"
 
 def parse_steps_per_epoch(dirname):
     m_bs = re.search(r'bs(\d+)', dirname)

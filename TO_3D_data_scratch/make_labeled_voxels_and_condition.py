@@ -128,6 +128,8 @@ def make_condition_vector(
 # Main generation
 # -----------------------------
 
+score_cutoff = .5
+
 def generate_voxels_for_shape_conditional(
     shape_tuple,
     n_samples,
@@ -187,7 +189,7 @@ def generate_voxels_for_shape_conditional(
     c_norm = 1.0 - c_raw_norm
 
     # Composite score and median cutoff
-    #score = 0.5 * m_norm + 0.5 * c_norm
+    score = 0.5 * m_norm + 0.5 * c_norm
     #cutoff = np.median(score)
     #print("Composite score stats: min", float(score.min()),
     #      "max", float(score.max()), "median", float(cutoff))
@@ -243,7 +245,7 @@ def generate_voxels_for_shape_conditional(
     fname = (
         f"{len(results)}_labeled_voxels_"
         f"{shape_tuple[0]}x{shape_tuple[1]}x{shape_tuple[2]}_"
-        f"medianScore.npy"
+        f"score{score_cutoff}.npy"
     )
     np.save(os.path.join(outdir, fname), np.array(results, dtype=object))
     print(
