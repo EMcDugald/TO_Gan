@@ -221,56 +221,119 @@ class ReusableDataLoader:
 # GAN Step (conditional, MDD) with label smoothing
 # -------------------------
 
+# def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
+#                          P_batch, N_batch, c_batch, noise_batch,
+#                          batch_size, device,
+#                          validity_weight=None, diversity_weight=0,
+#                          smooth_real=0.1, smooth_fake=0.0):
+#     """
+#     smooth_real: amount of label smoothing for real labels (e.g. 0.1 -> real target ~0.9)
+#     smooth_fake: amount of smoothing for fake labels (often 0.0 or small, e.g. 0.0–0.1)
+#     """
+#     criterion = nn.CrossEntropyLoss(reduction="none")
+
+#     D.zero_grad()
+
+#     # Real positives
+#     out_real_pos = D(P_batch, c_batch)  # [B, 2]
+#     log_probs_real_pos = torch.log_softmax(out_real_pos, dim=1)
+#     p_real_pos = torch.zeros_like(out_real_pos)
+#     p_real_pos[:, 0] = smooth_real / 2.0
+#     p_real_pos[:, 1] = 1.0 - smooth_real / 2.0
+#     L_D_real = -(p_real_pos * log_probs_real_pos).sum(dim=1).mean()
+
+#     # Real negatives
+#     out_real_neg = D(N_batch, c_batch)
+#     log_probs_real_neg = torch.log_softmax(out_real_neg, dim=1)
+#     p_real_neg = torch.zeros_like(out_real_neg)
+#     p_real_neg[:, 0] = 1.0 - smooth_real / 2.0
+#     p_real_neg[:, 1] = smooth_real / 2.0
+#     L_D_neg = -(p_real_neg * log_probs_real_neg).sum(dim=1).mean()
+
+#     # Fake (class 0, optionally smoothed)
+#     fake_data = G(noise_batch, c_batch)
+#     out_fake = D(fake_data.detach(), c_batch)
+#     log_probs_fake = torch.log_softmax(out_fake, dim=1)
+#     p_fake = torch.zeros_like(out_fake)
+#     p_fake[:, 0] = 1.0 - smooth_fake
+#     p_fake[:, 1] = smooth_fake
+#     L_D_fake = -(p_fake * log_probs_fake).sum(dim=1).mean()
+
+#     L_D_tot = L_D_real + L_D_neg + L_D_fake
+#     L_D_tot.backward()
+#     D_opt.step()
+
+#     # Generator wants fake to look "real"
+#     G.zero_grad()
+#     fake_data = G(noise_batch, c_batch)
+#     out_fake_for_G = D(fake_data, c_batch)
+#     log_probs_fake_for_G = torch.log_softmax(out_fake_for_G, dim=1)
+#     p_real_for_G = torch.zeros_like(out_fake_for_G)
+#     p_real_for_G[:, 0] = smooth_real / 2.0
+#     p_real_for_G[:, 1] = 1.0 - smooth_real / 2.0
+#     L_G = -(p_real_for_G * log_probs_fake_for_G).sum(dim=1).mean()
+#     L_G.backward()
+#     G_opt.step()
+
+#     report = {
+#         "L_D_real": float(L_D_real.item()),
+#         "L_D_neg": float(L_D_neg.item()),
+#         "L_D_fake": float(L_D_fake.item()),
+#         "L_G": float(L_G.item()),
+#     }
+#     return report
+
+
 def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                          P_batch, N_batch, c_batch, noise_batch,
                          batch_size, device,
                          validity_weight=None, diversity_weight=0,
                          smooth_real=0.1, smooth_fake=0.0):
     """
-    smooth_real: amount of label smoothing for real labels (e.g. 0.1 -> real target ~0.9)
-    smooth_fake: amount of smoothing for fake labels (often 0.0 or small, e.g. 0.0–0.1)
+    One-sided label smoothing:
+      - Real targets use 1 - smooth_real (e.g. 0.9) instead of 1.0.
+      - Fake targets stay at 0.0 (no smoothing on the fake side).
+    smooth_fake is kept in the signature but not used here (one-sided).
     """
-    criterion = nn.CrossEntropyLoss(reduction="none")
-
+    # Discriminator update
     D.zero_grad()
 
-    # Real positives
-    out_real_pos = D(P_batch, c_batch)  # [B, 2]
+    # ----- Real positives: target "real" with smoothing -----
+    out_real_pos = D(P_batch, c_batch)              # [B, 2] logits
     log_probs_real_pos = torch.log_softmax(out_real_pos, dim=1)
+    # Target distribution: fake = 0, real = 1 - smooth_real
     p_real_pos = torch.zeros_like(out_real_pos)
-    p_real_pos[:, 0] = smooth_real / 2.0
-    p_real_pos[:, 1] = 1.0 - smooth_real / 2.0
+    p_real_pos[:, 1] = 1.0 - smooth_real
     L_D_real = -(p_real_pos * log_probs_real_pos).sum(dim=1).mean()
 
-    # Real negatives
+    # ----- Real negatives: target "fake" (no smoothing) -----
     out_real_neg = D(N_batch, c_batch)
     log_probs_real_neg = torch.log_softmax(out_real_neg, dim=1)
+    # Target distribution: fake = 1, real = 0
     p_real_neg = torch.zeros_like(out_real_neg)
-    p_real_neg[:, 0] = 1.0 - smooth_real / 2.0
-    p_real_neg[:, 1] = smooth_real / 2.0
+    p_real_neg[:, 0] = 1.0
     L_D_neg = -(p_real_neg * log_probs_real_neg).sum(dim=1).mean()
 
-    # Fake (class 0, optionally smoothed)
+    # ----- Fake samples: target "fake" (no smoothing) -----
     fake_data = G(noise_batch, c_batch)
     out_fake = D(fake_data.detach(), c_batch)
     log_probs_fake = torch.log_softmax(out_fake, dim=1)
     p_fake = torch.zeros_like(out_fake)
-    p_fake[:, 0] = 1.0 - smooth_fake
-    p_fake[:, 1] = smooth_fake
+    p_fake[:, 0] = 1.0      # fake = 1, real = 0
     L_D_fake = -(p_fake * log_probs_fake).sum(dim=1).mean()
 
     L_D_tot = L_D_real + L_D_neg + L_D_fake
     L_D_tot.backward()
     D_opt.step()
 
-    # Generator wants fake to look "real"
+    # Generator update
     G.zero_grad()
     fake_data = G(noise_batch, c_batch)
     out_fake_for_G = D(fake_data, c_batch)
     log_probs_fake_for_G = torch.log_softmax(out_fake_for_G, dim=1)
+    # Generator wants D to say "real" with smoothed target
     p_real_for_G = torch.zeros_like(out_fake_for_G)
-    p_real_for_G[:, 0] = smooth_real / 2.0
-    p_real_for_G[:, 1] = 1.0 - smooth_real / 2.0
+    p_real_for_G[:, 1] = 1.0 - smooth_real
     L_G = -(p_real_for_G * log_probs_fake_for_G).sum(dim=1).mean()
     L_G.backward()
     G_opt.step()
@@ -282,6 +345,10 @@ def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
         "L_G": float(L_G.item()),
     }
     return report
+
+
+
+
 
 # -------------------------
 # Checkpoint saving
