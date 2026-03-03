@@ -393,228 +393,191 @@ def plot_voxel_grid_3d(voxel_grid, title="", save_path=None):
 # Main script
 # -------------------------
 
-# path to conditional training data
-data_path = "/xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/10000_labeled_voxels_32x32x32_medianScore.npy"
 
-batch_size = 32
-nz = 200
-ngf = 128
-ndf = 128
-num_epochs = 1000
+if __name__ == "__main__":
+    data_root = "/xdisk/hdb/emcdugald/to_cond_gan/train_data/323232"
 
-dataset = CondVoxelDataset(data_path)
-
-# split into P / N tensors and conditions
-pos_mask = (dataset.y == 1)
-neg_mask = (dataset.y == 0)
-
-P = dataset.X[pos_mask]
-C_P = dataset.C[pos_mask]
-
-N = dataset.X[neg_mask]
-C_N = dataset.C[neg_mask]
-
-n_samples = min(P.shape[0], N.shape[0])
-P = P[:n_samples]
-C_P = C_P[:n_samples]
-N = N[:n_samples]
-C_N = C_N[:n_samples]
-
-# -------------------------
-# Dataset-wide mass/compactness stats for evaluation
-# -------------------------
-
-# Work with binary versions of P (positives) to mirror the labeling logic
-P_np = (P.detach().numpy()[:, 0] > 0)  # [n_samples, D, H, W]
-
-# Use the helpers on the full positive set
-m_all = mass_fraction_batch(P_np)
-c_all = compactness_batch(P_np)
-
-m_min, m_max = float(m_all.min()), float(m_all.max())
-c_min, c_max = float(c_all.min()), float(c_all.max())
-
-# Recompute composite scores and the median cutoff
-eps = 1e-8
-m_norm_all = (m_all - m_min) / (m_max - m_min + eps)
-m_norm_all = np.clip(m_norm_all, 0.0, 1.0)
-
-c_raw_norm_all = (c_all - c_min) / (c_max - c_min + eps)
-c_raw_norm_all = np.clip(c_raw_norm_all, 0.0, 1.0)
-c_norm_all = 1.0 - c_raw_norm_all
-
-score_all = 0.5 * m_norm_all + 0.5 * c_norm_all
-score_cutoff = float(np.median(score_all))
-
-print("Eval stats (from positives):")
-print("  mass_frac min/max:", m_min, m_max)
-print("  compactness min/max:", c_min, c_max)
-print("  score median (cutoff):", score_cutoff)
-
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("device:", device)
-
-shape3d = P.shape[2:]
-cond_dim = C_P.shape[1]
-
-netG = CondGenerator3d(nz, ngf, shape3d, cond_dim)
-netD = CondDiscriminator3d(ndf, shape3d, cond_dim, nc=2)
-
-if device.type == "cuda" and torch.cuda.device_count() > 1:
-    print(f"Using DataParallel on {torch.cuda.device_count()} GPUs")
-    netG = nn.DataParallel(netG)
-    netD = nn.DataParallel(netD)
-
-netG = netG.to(device)
-netD = netD.to(device)
-
-P_loader = ReusableDataLoader(P, C_P, batch_size)
-N_loader = ReusableDataLoader(N, C_N, batch_size)
-num_steps = num_epochs * len(P) // batch_size
-
-D_opt = optim.Adam(netD.parameters(), lr=0.0002, betas=(0.5, 0.999))
-G_opt = optim.Adam(netG.parameters(), lr=0.0002, betas=(0.5, 0.999))
-
-base_ckpt_root = "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k"
-
-hp_name = (
-    f"epochs{num_epochs}_"
-    f"bs{batch_size}_"
-    f"nz{nz}_"
-    f"ngf{ngf}_"
-    f"ndf{ndf}_"
-    f"nsamp{n_samples}"
-)
-
-timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-checkpoint_dir = os.path.join(base_ckpt_root, f"{hp_name}_{timestamp}")
-os.makedirs(checkpoint_dir, exist_ok=True)
-
-steps_per_epoch = len(P) // batch_size
-ckpt_epochs = 100
-ckpt_interval = ckpt_epochs * steps_per_epoch
-
-netD, netG, _ = train_3d_cond(
-    netD, netG, None,
-    D_opt, G_opt, None,
-    P_loader, N_loader,
-    num_steps, batch_size, nz,
-    GAN_step_MDD_3d_cond, device,
-    validity_weight=.9, diversity_weight=.1,
-    checkpoint_dir=checkpoint_dir,
-    ckpt_interval=ckpt_interval,
-)
-
-# # -------------------------
-# # Generate and plot fake samples (saved into checkpoint_dir)
-# # -------------------------
-
-# netG.eval()
-# with torch.no_grad():
-#     z = torch.randn(batch_size, nz, device=device)
-#     # sample real conditions from positive set for visualization
-#     idx_vis = torch.randint(low=0, high=C_P.shape[0], size=(batch_size,))
-#     c_vis = C_P[idx_vis].to(device)
-#     fake = netG(z, c_vis).cpu().numpy()
-
-#     # save the conditions used for these fakes
-#     cond_np = c_vis.cpu().numpy()
-#     np.save(os.path.join(checkpoint_dir, "fake_conditions_vis.npy"), cond_np)
-#     np.save(os.path.join(checkpoint_dir, "fake_indices_vis.npy"),
-#             idx_vis.cpu().numpy())
-
-#     for idx in range(batch_size):
-#         fig_path = os.path.join(checkpoint_dir, f"fake_voxel_{idx}.png")
-#         plot_voxel_grid_3d(fake[idx, 0], title=f"Fake sample {idx}", save_path=fig_path)
-# print(f"Saved voxel plots for {batch_size} fake samples.")
-
-# -------------------------
-# Generate and plot fake samples (saved into checkpoint_dir)
-# -------------------------
-
-netG.eval()
-with torch.no_grad():
-    z = torch.randn(batch_size, nz, device=device)
-    # sample real conditions from positive set for visualization
-    idx_vis = torch.randint(low=0, high=C_P.shape[0], size=(batch_size,))
-    c_vis = C_P[idx_vis].to(device)
-    fake = netG(z, c_vis).cpu().numpy()
-
-    # numpy copy of conditions
-    cond_np = c_vis.cpu().numpy()
-
-    # (optional) still save raw arrays if you want
-    np.save(os.path.join(checkpoint_dir, "fake_conditions_vis.npy"), cond_np)
-    np.save(
-        os.path.join(checkpoint_dir, "fake_indices_vis.npy"),
-        idx_vis.cpu().numpy(),
+    # Adjust names to match your generated files
+    data_path = os.path.join(
+        data_root,
+        "10000_labeled_voxels_32x32x32_score0.7.npy"
+    )
+    meta_path = os.path.join(
+        data_root,
+        "10000_labeled_voxels_32x32x32_score0.7_meta.npz"
     )
 
-    # NEW: text file mapping fake_voxel_i.png -> condition vector
-    txt_path = os.path.join(checkpoint_dir, "fake_voxel_conditions.txt")
-    with open(txt_path, "w") as f_txt:
-        f_txt.write("# idx  filename           condition_vector\n")
-        for idx in range(batch_size):
-            filename = f"fake_voxel_{idx}.png"
-            fig_path = os.path.join(checkpoint_dir, filename)
-            plot_voxel_grid_3d(
-                fake[idx, 0],
-                title=f"Fake sample {idx}",
-                save_path=fig_path,
-            )
-            cond_str = " ".join(f"{v:.6f}" for v in cond_np[idx])
-            f_txt.write(f"{idx:03d}  {filename}  {cond_str}\n")
+    # Load cutoff and normalization from generator meta
+    meta = np.load(meta_path)
+    cutoff_train = float(meta["cutoff_train"])
+    score_cutoff = float(meta["score_cutoff"])
+    m_min = float(meta["m_min"])
+    m_max = float(meta["m_max"])
+    c_min = float(meta["c_min"])
+    c_max = float(meta["c_max"])
 
-print(f"Saved voxel plots and fake_voxel_conditions.txt for {batch_size} fake samples.")
+    batch_size = 32
+    nz = 200
+    ngf = 128
+    ndf = 128
+    num_epochs = 1000
 
+    dataset = CondVoxelDataset(data_path)
 
+    # split into P / N tensors and conditions using labels
+    pos_mask = (dataset.y == 1)
+    neg_mask = (dataset.y == 0)
 
+    P = dataset.X[pos_mask]
+    C_P = dataset.C[pos_mask]
 
-# -------------------------
-# Evaluate generator by mass+compactness score
-# -------------------------
+    N = dataset.X[neg_mask]
+    C_N = dataset.C[neg_mask]
 
-batches_eval = 10
-all_scores = []
-all_mass = []
-all_comp = []
+    n_samples = P.shape[0] + N.shape[0]
 
-netG.eval()
-with torch.no_grad():
-    for _ in trange(batches_eval):
+    print("P size:", P.shape)
+    print("C_P size:", C_P.shape)
+    print("N size:", N.shape)
+    print("C_N size:", C_N.shape)
+
+    print("Eval stats (from generator meta):")
+    print("  mass_frac min/max:", m_min, m_max)
+    print("  compactness min/max:", c_min, c_max)
+    print("  score_cutoff quantile (generator):", score_cutoff)
+    print("  score_cutoff VALUE (cutoff_train):", cutoff_train)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("device:", device)
+
+    shape3d = P.shape[2:]
+    cond_dim = C_P.shape[1]
+
+    netG = CondGenerator3d(nz, ngf, shape3d, cond_dim)
+    netD = CondDiscriminator3d(ndf, shape3d, cond_dim, nc=2)
+
+    netG = netG.to(device)
+    netD = netD.to(device)
+
+    P_loader = ReusableDataLoader(P, C_P, batch_size)
+    N_loader = ReusableDataLoader(N, C_N, batch_size)
+    num_steps = num_epochs * len(P) // batch_size
+
+    D_opt = optim.Adam(netD.parameters(), lr=0.0002, betas=(0.5, 0.999))
+    G_opt = optim.Adam(netG.parameters(), lr=0.0002, betas=(0.5, 0.999))
+
+    base_ckpt_root = "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k"
+
+    hp_name = (
+        f"epochs{num_epochs}_"
+        f"bs{batch_size}_"
+        f"nz{nz}_"
+        f"ngf{ngf}_"
+        f"ndf{ndf}_"
+        f"nsamp{n_samples}"
+    )
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    checkpoint_dir = os.path.join(base_ckpt_root, f"{hp_name}_{timestamp}")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    steps_per_epoch = len(P) // batch_size
+    ckpt_epochs = 100
+    ckpt_interval = ckpt_epochs * steps_per_epoch
+
+    netD, netG, _ = train_3d_cond(
+        netD, netG, None,
+        D_opt, G_opt, None,
+        P_loader, N_loader,
+        num_steps, batch_size, nz,
+        GAN_step_MDD_3d_cond, device,
+        validity_weight=.9, diversity_weight=.1,
+        checkpoint_dir=checkpoint_dir,
+        ckpt_interval=ckpt_interval,
+    )
+
+    # -------------------------
+    # Generate and plot fake samples (saved into checkpoint_dir)
+    # -------------------------
+
+    netG.eval()
+    with torch.no_grad():
         z = torch.randn(batch_size, nz, device=device)
-        # sample real conditions from positives for evaluation
-        idx_eval = torch.randint(low=0, high=C_P.shape[0], size=(batch_size,))
-        c_eval = C_P[idx_eval].to(device)
+        idx_vis = torch.randint(low=0, high=C_P.shape[0], size=(batch_size,))
+        c_vis = C_P[idx_vis].to(device)
+        fake = netG(z, c_vis).cpu().numpy()
 
-        fake = netG(z, c_eval).cpu().numpy()  # [B, 1, D, H, W]
-        fake_bin = (fake > 0).astype(np.float64)
-        batch_np = fake_bin[:, 0, :, :, :]     # [B, D, H, W]
-
-        score, mass_fracs, comp_vals = score_batch_mass_compactness(
-            batch_np, m_min, m_max, c_min, c_max
+        cond_np = c_vis.cpu().numpy()
+        np.save(os.path.join(checkpoint_dir, "fake_conditions_vis.npy"), cond_np)
+        np.save(
+            os.path.join(checkpoint_dir, "fake_indices_vis.npy"),
+            idx_vis.cpu().numpy(),
         )
-        all_scores.append(score)
-        all_mass.append(mass_fracs)
-        all_comp.append(comp_vals)
 
-all_scores = np.concatenate(all_scores)
-all_mass = np.concatenate(all_mass)
-all_comp = np.concatenate(all_comp)
+        txt_path = os.path.join(checkpoint_dir, "fake_voxel_conditions.txt")
+        with open(txt_path, "w") as f_txt:
+            f_txt.write("# idx  filename           condition_vector\n")
+            for idx in range(batch_size):
+                filename = f"fake_voxel_{idx}.png"
+                fig_path = os.path.join(checkpoint_dir, filename)
+                plot_voxel_grid_3d(
+                    fake[idx, 0],
+                    title=f"Fake sample {idx}",
+                    save_path=fig_path,
+                )
+                cond_str = " ".join(f"{v:.6f}" for v in cond_np[idx])
+                f_txt.write(f"{idx:03d}  {filename}  {cond_str}\n")
 
-# “Positive” under the new metric = score < score_cutoff
-positive_rate = float((all_scores < score_cutoff).mean() * 100.0)
-mean_mass = float(all_mass.mean())
-mean_comp = float(all_comp.mean())
+    print(f"Saved voxel plots and fake_voxel_conditions.txt for {batch_size} fake samples.")
 
-print("Mass+compactness positive rate (%):", positive_rate)
-print("Mean mass fraction:", mean_mass)
-print("Mean compactness:", mean_comp)
+    # -------------------------
+    # Evaluate generator by mass+compactness score
+    # -------------------------
 
-results_txt = os.path.join(checkpoint_dir, "evaluation_mass_compactness.txt")
-with open(results_txt, "w") as f:
-    f.write(f"Mass+compactness positive rate (%): {positive_rate:.4f}\n")
-    f.write(f"Mean mass fraction: {mean_mass:.6f}\n")
-    f.write(f"Mean compactness: {mean_comp:.6f}\n")
+    batches_eval = 10
+    all_scores = []
+    all_mass = []
+    all_comp = []
+
+    netG.eval()
+    with torch.no_grad():
+        for _ in trange(batches_eval):
+            z = torch.randn(batch_size, nz, device=device)
+            idx_eval = torch.randint(low=0, high=C_P.shape[0], size=(batch_size,))
+            c_eval = C_P[idx_eval].to(device)
+
+            fake = netG(z, c_eval).cpu().numpy()  # [B, 1, D, H, W]
+            fake_bin = (fake > 0).astype(np.float64)
+            batch_np = fake_bin[:, 0, :, :, :]
+
+            score, mass_fracs, comp_vals = score_batch_mass_compactness(
+                batch_np, m_min, m_max, c_min, c_max
+            )
+            all_scores.append(score)
+            all_mass.append(mass_fracs)
+            all_comp.append(comp_vals)
+
+    all_scores = np.concatenate(all_scores)
+    all_mass = np.concatenate(all_mass)
+    all_comp = np.concatenate(all_comp)
+
+    # Use the same cutoff the generator used to label data
+    positive_rate = float((all_scores < cutoff_train).mean() * 100.0)
+    mean_mass = float(all_mass.mean())
+    mean_comp = float(all_comp.mean())
+
+    print("Training quantile (score_cutoff):", score_cutoff)
+    print("Training raw cutoff value (cutoff_train):", cutoff_train)
+    print("Mass+compactness positive rate wrt TRAIN cutoff (%):", positive_rate)
+    print("Mean mass fraction:", mean_mass)
+    print("Mean compactness:", mean_comp)
+
+    results_txt = os.path.join(checkpoint_dir, "evaluation_mass_compactness.txt")
+    with open(results_txt, "w") as f:
+        f.write(f"score_cutoff_quantile_train: {score_cutoff:.4f}\n")
+        f.write(f"score_cutoff_value_train: {cutoff_train:.6f}\n")
+        f.write(f"Mass+compactness positive rate wrt train cutoff (%): {positive_rate:.4f}\n")
+        f.write(f"Mean mass fraction: {mean_mass:.6f}\n")
+        f.write(f"Mean compactness: {mean_comp:.6f}\n")
+
 

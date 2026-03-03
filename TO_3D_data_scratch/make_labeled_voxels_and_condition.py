@@ -128,7 +128,7 @@ def make_condition_vector(
 # Main generation
 # -----------------------------
 
-score_cutoff = .5
+score_cutoff = .7
 
 def generate_voxels_for_shape_conditional(
     shape_tuple,
@@ -190,13 +190,10 @@ def generate_voxels_for_shape_conditional(
 
     # Composite score and median cutoff
     score = 0.5 * m_norm + 0.5 * c_norm
-    #cutoff = np.median(score)
-    #print("Composite score stats: min", float(score.min()),
-    #      "max", float(score.max()), "median", float(cutoff))
 
-    cutoff = np.quantile(score, 0.8)  # or 0.75, etc.
+    cutoff = np.quantile(score, score_cutoff)
     print("Composite score stats: min", float(score.min()),
-      "max", float(score.max()), "q=0.8 cutoff", float(cutoff))
+      "max", float(score.max()), f"q={score_cutoff} cutoff", float(cutoff))
 
     # Bin edges for mag / mass / compactness (for condition bins)
     mag_edges  = compute_bin_edges(mags,       n_mag_bins)
@@ -247,11 +244,31 @@ def generate_voxels_for_shape_conditional(
         f"{shape_tuple[0]}x{shape_tuple[1]}x{shape_tuple[2]}_"
         f"score{score_cutoff}.npy"
     )
-    np.save(os.path.join(outdir, fname), np.array(results, dtype=object))
+    data_path = os.path.join(outdir, fname)
+    np.save(data_path, np.array(results, dtype=object))
+
+    # NEW: save cutoff and score_cutoff in a sidecar .npz
+    meta_fname = (
+        f"{len(results)}_labeled_voxels_"
+        f"{shape_tuple[0]}x{shape_tuple[1]}x{shape_tuple[2]}_"
+        f"score{score_cutoff}_meta.npz"
+    )
+    meta_path = os.path.join(outdir, meta_fname)
+    np.savez(
+        meta_path,
+        cutoff_train=float(cutoff),
+        score_cutoff=float(score_cutoff),
+        m_min=float(m_min),
+        m_max=float(m_max),
+        c_min=float(c_min),
+        c_max=float(c_max),
+    )
+
     print(
         f"Saved {len(results)} labeled voxel structures of shape {shape_tuple} "
-        f"to {fname} (median cutoff={cutoff:.4f}, pos={n_pos}, neg={n_neg})"
+        f"to {fname} (cutoff={cutoff:.4f}, pos={n_pos}, neg={n_neg})"
     )
+
 
 
 if __name__ == "__main__":
