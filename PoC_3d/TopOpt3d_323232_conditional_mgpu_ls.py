@@ -475,13 +475,13 @@ if __name__ == "__main__":
     data_path = "/xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/10000_labeled_voxels_32x32x32_score0.8.npy"
 
     batch_size = 32
-    nz = 200
-    ngf = 128
-    ndf = 128
+    nz = 300
+    ngf = 256
+    ndf = 64
     num_epochs = 1000
 
     # Hyperparameters
-    lr_D = 1e-4
+    lr_D = 1e-5
     lr_G = 2e-4
     smooth_real = 0.1
     smooth_fake = 0.0
@@ -497,11 +497,22 @@ if __name__ == "__main__":
     N = dataset.X[neg_mask]
     C_N = dataset.C[neg_mask]
 
+    print("P size:",P.shape)
+    print("CP Size:",C_P.shape)
+    print("N size:",N.shape)
+    print("CN Size:",C_N.shape)
+
+    # n_samples = min(P.shape[0], N.shape[0])
+    # P = P[:n_samples]
+    # C_P = C_P[:n_samples]
+    # N = N[:n_samples]
+    # C_N = C_N[:n_samples]
+
     n_samples = min(P.shape[0], N.shape[0])
-    P = P[:n_samples]
-    C_P = C_P[:n_samples]
-    N = N[:n_samples]
-    C_N = C_N[:n_samples]
+    P = P[:7500]
+    C_P = C_P[:7500]
+    N = N[:1750]
+    C_N = C_N[:1750]
 
     # Dataset-wide mass/compactness stats from TRAIN positives
     P_np = (P.detach().numpy()[:, 0] > 0)

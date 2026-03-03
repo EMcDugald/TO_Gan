@@ -501,7 +501,7 @@ netD, netG, _ = train_3d_cond(
     P_loader, N_loader,
     num_steps, batch_size, nz,
     GAN_step_MDD_3d_cond, device,
-    validity_weight=1, diversity_weight=0,
+    validity_weight=.9, diversity_weight=.1,
     checkpoint_dir=checkpoint_dir,
     ckpt_interval=ckpt_interval,
 )
