@@ -231,10 +231,16 @@ def generate_voxels_for_shape_conditional(
             n_comp_bins=n_comp_bins
         )
 
-        label_val = 1 if s < cutoff else 0  # 1 = "better" structures
+        # NEW: human-readable condition string
+        cond_str = (
+            f"BCn_{n_bc}_BCpattern_{nx}{ny}{nz}_"
+            f"LoadMagBin_{mag_bin}_MassBin_{mass_bin}_CompBin_{comp_bin}"
+            )
+        label_val = 1 if s < cutoff else 0
+
         labels_list.append(label_val)
 
-        results.append((voxel_arr, cond_vec, label_val))
+        results.append((voxel_arr, cond_vec, label_val, cond_str))
 
     n_pos = int(sum(labels_list))
     n_neg = len(labels_list) - n_pos

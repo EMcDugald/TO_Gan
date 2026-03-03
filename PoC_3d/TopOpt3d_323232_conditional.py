@@ -39,10 +39,12 @@ class CondVoxelDataset(Dataset):
         voxels = [x[0] for x in data]
         conds  = [x[1] for x in data]
         labels = [x[2] for x in data]
+        cond_strs = [x[3] for x in data]
 
         X = torch.tensor(np.stack(voxels), dtype=torch.float32)
         C = torch.tensor(np.stack(conds), dtype=torch.float32)
         y = torch.tensor(labels, dtype=torch.long)
+        self.cond_strs = cond_strs
 
         if X.ndim == 4:
             X = X.unsqueeze(1)  # [N, 1, D, H, W]
@@ -507,6 +509,9 @@ if __name__ == "__main__":
         c_vis = C_P[idx_vis].to(device)
         fake = netG(z, c_vis).cpu().numpy()
 
+        # Recover strings from the dataset
+        cond_strs_vis = [dataset.cond_strs[int(i)] for i in idx_vis.cpu().numpy()]
+
         cond_np = c_vis.cpu().numpy()
         np.save(os.path.join(checkpoint_dir, "fake_conditions_vis.npy"), cond_np)
         np.save(
@@ -516,17 +521,16 @@ if __name__ == "__main__":
 
         txt_path = os.path.join(checkpoint_dir, "fake_voxel_conditions.txt")
         with open(txt_path, "w") as f_txt:
-            f_txt.write("# idx  filename           condition_vector\n")
+            f_txt.write("# idx  filename           condition_vector  condition_string\n")
             for idx in range(batch_size):
                 filename = f"fake_voxel_{idx}.png"
                 fig_path = os.path.join(checkpoint_dir, filename)
-                plot_voxel_grid_3d(
-                    fake[idx, 0],
-                    title=f"Fake sample {idx}",
-                    save_path=fig_path,
-                )
-                cond_str = " ".join(f"{v:.6f}" for v in cond_np[idx])
-                f_txt.write(f"{idx:03d}  {filename}  {cond_str}\n")
+                plot_voxel_grid_3d(fake[idx, 0], title=f"Fake sample {idx}", save_path=fig_path)
+
+                cond_str_num = " ".join(f"{v:.6f}" for v in cond_np[idx])
+                cond_str_human = cond_strs_vis[idx]  # e.g. BCn_3_BCpattern_322_LoadMagBin_1_...
+                f_txt.write(f"{idx:03d}  {filename}  {cond_str_num}  {cond_str_human}\n")
+
 
     print(f"Saved voxel plots and fake_voxel_conditions.txt for {batch_size} fake samples.")
 
