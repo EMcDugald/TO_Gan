@@ -230,11 +230,56 @@ class ReusableDataLoader:
 # GAN Step (conditional, MDD)
 # -------------------------
 
+# def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
+#                          P_batch, N_batch, c_batch, noise_batch,
+#                          batch_size, device,
+#                          validity_weight=None, diversity_weight=0):
+#     criterion = nn.CrossEntropyLoss()
+#     D.zero_grad()
+#     t = torch.full((batch_size,), 1, dtype=torch.long, device=device)
+#     o = torch.full((batch_size,), 0, dtype=torch.long, device=device)
+
+#     # Discriminator on real positives
+#     output = D(P_batch, c_batch)
+#     L_D_real = criterion(output, t)
+
+#     # Discriminator on real negatives
+#     output = D(N_batch, c_batch)
+#     L_D_neg = criterion(output, o)
+
+#     # Discriminator on fake
+#     fake_data = G(noise_batch, c_batch)
+#     output = D(fake_data.detach(), c_batch)
+#     L_D_fake = criterion(output, o)
+
+#     L_D_tot = L_D_real + L_D_neg + L_D_fake
+#     L_D_tot.backward()
+#     D_opt.step()
+
+#     # Generator
+#     G.zero_grad()
+#     fake_data = G(noise_batch, c_batch)
+#     output = D(fake_data, c_batch)
+#     L_G = criterion(output, t)
+#     L_G.backward()
+#     G_opt.step()
+
+#     report = {
+#         "L_D_real": L_D_real.item(),
+#         "L_D_neg": L_D_neg.item(),
+#         "L_D_fake": L_D_fake.item(),
+#         "L_G": L_G.item()
+#     }
+#     return report
+
+
 def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                          P_batch, N_batch, c_batch, noise_batch,
                          batch_size, device,
                          validity_weight=None, diversity_weight=0):
     criterion = nn.CrossEntropyLoss()
+
+    # ----------------- Discriminator update -----------------
     D.zero_grad()
     t = torch.full((batch_size,), 1, dtype=torch.long, device=device)
     o = torch.full((batch_size,), 0, dtype=torch.long, device=device)
@@ -254,23 +299,42 @@ def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
 
     L_D_tot = L_D_real + L_D_neg + L_D_fake
     L_D_tot.backward()
+
+    # D gradient norm
+    D_grad_norm = 0.0
+    for p in D.parameters():
+        if p.grad is not None:
+            D_grad_norm += p.grad.detach().pow(2).sum().item()
+    D_grad_norm = D_grad_norm ** 0.5
+
     D_opt.step()
 
-    # Generator
+    # ----------------- Generator update -----------------
     G.zero_grad()
     fake_data = G(noise_batch, c_batch)
     output = D(fake_data, c_batch)
     L_G = criterion(output, t)
     L_G.backward()
+
+    # G gradient norm
+    G_grad_norm = 0.0
+    for p in G.parameters():
+        if p.grad is not None:
+            G_grad_norm += p.grad.detach().pow(2).sum().item()
+    G_grad_norm = G_grad_norm ** 0.5
+
     G_opt.step()
 
     report = {
         "L_D_real": L_D_real.item(),
         "L_D_neg": L_D_neg.item(),
         "L_D_fake": L_D_fake.item(),
-        "L_G": L_G.item()
+        "L_G": L_G.item(),
+        "D_grad_norm": float(D_grad_norm),
+        "G_grad_norm": float(G_grad_norm),
     }
     return report
+
 
 
 # -------------------------

@@ -18,11 +18,9 @@ from scipy.ndimage import label as scipy_label
 import csv
 from datetime import datetime
 
-
 # -------------------------
 # Data loading
 # -------------------------
-
 
 class DataNotFoundError(Exception):
     pass
@@ -69,11 +67,9 @@ class CondVoxelDataset(Dataset):
     def __getitem__(self, idx):
         return self.X[idx], self.C[idx], self.y[idx]
 
-
 # -------------------------
 # Mass / compactness scoring for batches
 # -------------------------
-
 
 def mass_fraction_batch(batch_np):
     """
@@ -119,7 +115,6 @@ def score_batch_mass_compactness(batch_np, m_min, m_max, c_min, c_max):
     mass_fracs = mass_fraction_batch(batch_np)
     comp_vals = compactness_batch(batch_np)
 
-    # normalize as in make_labeled_voxels_and_condition.py
     m_norm = (mass_fracs - m_min) / (m_max - m_min + eps)
     m_norm = np.clip(m_norm, 0.0, 1.0)
 
@@ -132,11 +127,22 @@ def score_batch_mass_compactness(batch_np, m_min, m_max, c_min, c_max):
     score = 0.5 * m_norm + 0.5 * c_norm
     return score, mass_fracs, comp_vals
 
+def diversity_loss(x):
+    # x: [B, F] features. For voxels, you may want to flatten or embed first.
+    r = torch.sum(x ** 2, dim=1, keepdim=True)
+    D = r - 2 * torch.matmul(x, x.T) + r.T
+    S = torch.exp(-0.5 * D ** 2)
+    try:
+        eig_val = torch.linalg.eigvalsh(S)
+    except:
+        eig_val = torch.ones(x.size(0), device=x.device)
+    loss = -torch.mean(torch.log(torch.clamp(eig_val, min=1e-7)))
+    return loss
+
 
 # -------------------------
 # Conditional models
 # -------------------------
-
 
 class CondGenerator3d(nn.Module):
     def __init__(self, nz, ngf, output_shape, cond_dim, cond_embed_dim=32):
@@ -198,11 +204,9 @@ class CondDiscriminator3d(nn.Module):
         out = self.fc(hc)
         return out
 
-
 # -------------------------
 # ReusableDataLoader (x, c)
 # -------------------------
-
 
 class ReusableDataLoader:
     def __init__(self, X, C, batch_size, shuffle=True):
@@ -229,76 +233,42 @@ class ReusableDataLoader:
         return x_batch, c_batch
 
 
-# -------------------------
-# GAN Step (conditional, MDD)
-# -------------------------
-
-
-# def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
-#                          P_batch, N_batch, c_batch, noise_batch,
-#                          batch_size, device,
-#                          validity_weight=None, diversity_weight=0):
-#     criterion = nn.CrossEntropyLoss()
-#     D.zero_grad()
-#     t = torch.full((batch_size,), 1, dtype=torch.long, device=device)
-#     o = torch.full((batch_size,), 0, dtype=torch.long, device=device)
-
-#     # Discriminator on real positives
-#     output = D(P_batch, c_batch)
-#     L_D_real = criterion(output, t)
-
-#     # Discriminator on real negatives
-#     output = D(N_batch, c_batch)
-#     L_D_neg = criterion(output, o)
-
-#     # Discriminator on fake
-#     fake_data = G(noise_batch, c_batch)
-#     output = D(fake_data.detach(), c_batch)
-#     L_D_fake = criterion(output, o)
-
-#     L_D_tot = L_D_real + L_D_neg + L_D_fake
-#     L_D_tot.backward()
-#     D_opt.step()
-
-#     # Generator
-#     G.zero_grad()
-#     fake_data = G(noise_batch, c_batch)
-#     output = D(fake_data, c_batch)
-#     L_G = criterion(output, t)
-#     L_G.backward()
-#     G_opt.step()
-
-#     report = {
-#         "L_D_real": L_D_real.item(),
-#         "L_D_neg": L_D_neg.item(),
-#         "L_D_fake": L_D_fake.item(),
-#         "L_G": L_G.item()
-#     }
-#     return report
 
 def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                          P_batch, N_batch, c_batch, noise_batch,
                          batch_size, device,
-                         validity_weight=None, diversity_weight=0):
-    criterion = nn.CrossEntropyLoss()
-
+                         validity_weight=None, diversity_weight=0.05,
+                         smooth_real=0.1, smooth_fake=0.0):
+    """
+    One-sided label smoothing:
+      - Real targets use 1 - smooth_real (e.g. 0.9) instead of 1.0.
+      - Fake targets stay at 0.0 (no smoothing on the fake side).
+    smooth_fake is kept in the signature but not used here (one-sided).
+    """
     # ----------------- Discriminator update -----------------
     D.zero_grad()
-    t = torch.full((batch_size,), 1, dtype=torch.long, device=device)
-    o = torch.full((batch_size,), 0, dtype=torch.long, device=device)
 
-    # Discriminator on real positives
-    output = D(P_batch, c_batch)
-    L_D_real = criterion(output, t)
+    # Real positives
+    out_real_pos = D(P_batch, c_batch)              # [B, 2] logits
+    log_probs_real_pos = torch.log_softmax(out_real_pos, dim=1)
+    p_real_pos = torch.zeros_like(out_real_pos)
+    p_real_pos[:, 1] = 1.0 - smooth_real
+    L_D_real = -(p_real_pos * log_probs_real_pos).sum(dim=1).mean()
 
-    # Discriminator on real negatives
-    output = D(N_batch, c_batch)
-    L_D_neg = criterion(output, o)
+    # Real negatives
+    out_real_neg = D(N_batch, c_batch)
+    log_probs_real_neg = torch.log_softmax(out_real_neg, dim=1)
+    p_real_neg = torch.zeros_like(out_real_neg)
+    p_real_neg[:, 0] = 1.0
+    L_D_neg = -(p_real_neg * log_probs_real_neg).sum(dim=1).mean()
 
-    # Discriminator on fake
+    # Fake samples
     fake_data = G(noise_batch, c_batch)
-    output = D(fake_data.detach(), c_batch)
-    L_D_fake = criterion(output, o)
+    out_fake = D(fake_data.detach(), c_batch)
+    log_probs_fake = torch.log_softmax(out_fake, dim=1)
+    p_fake = torch.zeros_like(out_fake)
+    p_fake[:, 0] = 1.0
+    L_D_fake = -(p_fake * log_probs_fake).sum(dim=1).mean()
 
     L_D_tot = L_D_real + L_D_neg + L_D_fake
     L_D_tot.backward()
@@ -315,9 +285,23 @@ def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
     # ----------------- Generator update -----------------
     G.zero_grad()
     fake_data = G(noise_batch, c_batch)
-    output = D(fake_data, c_batch)
-    L_G = criterion(output, t)
-    L_G.backward()
+    out_fake_for_G = D(fake_data, c_batch)
+    log_probs_fake_for_G = torch.log_softmax(out_fake_for_G, dim=1)
+
+    p_real_for_G = torch.zeros_like(out_fake_for_G)
+    p_real_for_G[:, 1] = 1.0 - smooth_real
+    L_G = -(p_real_for_G * log_probs_fake_for_G).sum(dim=1).mean()
+
+    # Optional diversity term
+    if diversity_weight is not None and diversity_weight > 0:
+        feat = fake_data.view(fake_data.size(0), -1)
+        L_div = diversity_loss(feat)
+        L_G_tot = L_G + diversity_weight * L_div
+    else:
+        L_div = None
+        L_G_tot = L_G
+
+    L_G_tot.backward()
 
     # G gradient norm
     G_grad_norm = 0.0
@@ -329,13 +313,15 @@ def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
     G_opt.step()
 
     report = {
-        "L_D_real": L_D_real.item(),
-        "L_D_neg": L_D_neg.item(),
-        "L_D_fake": L_D_fake.item(),
-        "L_G": L_G.item(),
+        "L_D_real": float(L_D_real.item()),
+        "L_D_neg": float(L_D_neg.item()),
+        "L_D_fake": float(L_D_fake.item()),
+        "L_G": float(L_G.item()),
         "D_grad_norm": float(D_grad_norm),
         "G_grad_norm": float(G_grad_norm),
     }
+    if L_div is not None:
+        report["L_div"] = float(L_div.item())
     return report
 
 
@@ -343,7 +329,6 @@ def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
 # -------------------------
 # Checkpoint saving
 # -------------------------
-
 
 def unwrap_module(m):
     return m.module if isinstance(m, nn.DataParallel) else m
@@ -363,18 +348,17 @@ def save_checkpoint(step, netG, netD, G_opt, D_opt, path):
         path,
     )
 
-
 # -------------------------
 # Training loop with metrics
 # -------------------------
-
 
 def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                   P_loader, N_loader,
                   num_steps, batch_size, noise_dim,
                   train_step_fn, device,
                   validity_weight, diversity_weight=0,
-                  checkpoint_dir=None, ckpt_interval=None):
+                  checkpoint_dir=None, ckpt_interval=None,
+                  smooth_real=0.1, smooth_fake=0.0):
     best_G_loss = float("inf")
 
     metrics_file = None
@@ -393,7 +377,6 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
         P_batch, cP = P_loader.get_batch()
         N_batch, cN = N_loader.get_batch()
 
-        # use same conditions for P and N batches (assuming same sampling)
         c_batch = cP.to(device)
 
         P_batch = P_batch.to(device)
@@ -407,6 +390,8 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
             batch_size, device,
             validity_weight=validity_weight,
             diversity_weight=diversity_weight,
+            smooth_real=smooth_real,
+            smooth_fake=smooth_fake,
         )
 
         postfix = {key: "{:.4f}".format(value) for key, value in report.items()}
@@ -442,42 +427,29 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
 
     return D, G, A
 
-
 # --------------------------
 # 3D Plotting
 # --------------------------
 
-
 def plot_voxel_grid_3d(voxel_grid, title="", save_path=None):
     fig = plt.figure()
     ax = fig.add_subplot(111, projection="3d")
-    ax.voxels(voxel_grid > 0, edgecolor="k", linewidth=0.2)
+    ax.voxels(voxel_grid > 0.1, edgecolor="k", linewidth=0.2)  # slightly >0 to reduce speckle
     ax.set_title(title)
     plt.axis("off")
     if save_path:
         plt.savefig(save_path, bbox_inches="tight")
     plt.close(fig)
 
-
 # -------------------------
 # Main script
 # -------------------------
 
-
 if __name__ == "__main__":
     data_root = "/xdisk/hdb/emcdugald/to_cond_gan/train_data/323232"
+    data_path = os.path.join(data_root, "10000_labeled_voxels_32x32x32_score0.7.npy")
+    meta_path = os.path.join(data_root, "10000_labeled_voxels_32x32x32_score0.7_meta.npz")
 
-    # Adjust these names to match how you actually saved the old data
-    data_path = os.path.join(
-        data_root,
-        "10000_labeled_voxels_32x32x32_score0.7.npy"
-    )
-    meta_path = os.path.join(
-        data_root,
-        "10000_labeled_voxels_32x32x32_score0.7_meta.npz"
-    )
-
-    # Load cutoff and normalization from generator meta
     meta = np.load(meta_path)
     cutoff_train = float(meta["cutoff_train"])
     score_cutoff = float(meta["score_cutoff"])
@@ -487,14 +459,19 @@ if __name__ == "__main__":
     c_max = float(meta["c_max"])
 
     batch_size = 32
-    nz = 200
-    ngf = 128
-    ndf = 128
-    num_epochs = 1000
+    nz = 300
+    ngf = 256
+    ndf = 64
+    num_epochs = 100
+
+    # Hyperparameters
+    lr_D = 1e-5
+    lr_G = 2e-4
+    smooth_real = 0.1
+    smooth_fake = 0.0
 
     dataset = CondVoxelDataset(data_path)
 
-    # split into P / N tensors and conditions using labels
     pos_mask = (dataset.y == 1)
     neg_mask = (dataset.y == 0)
 
@@ -504,18 +481,19 @@ if __name__ == "__main__":
     N = dataset.X[neg_mask]
     C_N = dataset.C[neg_mask]
 
-    n_samples = P.shape[0] + N.shape[0]
+    print("P size:",P.shape)
+    print("CP Size:",C_P.shape)
+    print("N size:",N.shape)
+    print("CN Size:",C_N.shape)
 
-    print("P size:", P.shape)
-    print("C_P size:", C_P.shape)
-    print("N size:", N.shape)
-    print("C_N size:", C_N.shape)
+    n_samples = P.shape[0]+N.shape[0]
 
     print("Eval stats (from generator meta):")
     print("  mass_frac min/max:", m_min, m_max)
     print("  compactness min/max:", c_min, c_max)
     print("  score_cutoff quantile (generator):", score_cutoff)
     print("  score_cutoff VALUE (cutoff_train):", cutoff_train)
+
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("device:", device)
@@ -527,7 +505,6 @@ if __name__ == "__main__":
     netG = CondGenerator3d(nz, ngf, shape3d, cond_dim)
     netD = CondDiscriminator3d(ndf, shape3d, cond_dim, nc=2)
 
-    # Multi-GPU
     if device.type == "cuda" and torch.cuda.device_count() > 1:
         print(f"Using DataParallel on {torch.cuda.device_count()} GPUs")
         netG = nn.DataParallel(netG)
@@ -540,23 +517,41 @@ if __name__ == "__main__":
     N_loader = ReusableDataLoader(N, C_N, batch_size)
     num_steps = num_epochs * len(P) // batch_size
 
-    D_opt = optim.Adam(netD.parameters(), lr=0.0002, betas=(0.5, 0.999))
-    G_opt = optim.Adam(netG.parameters(), lr=0.0002, betas=(0.5, 0.999))
+    D_opt = optim.Adam(netD.parameters(), lr=lr_D, betas=(0.5, 0.999))
+    G_opt = optim.Adam(netG.parameters(), lr=lr_G, betas=(0.5, 0.999))
 
     base_ckpt_root = "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k"
 
     hp_name = (
+        f"ls_with_div_"
         f"epochs{num_epochs}_"
         f"bs{batch_size}_"
         f"nz{nz}_"
         f"ngf{ngf}_"
         f"ndf{ndf}_"
-        f"nsamp{n_samples}"
+        f"nsamp{n_samples}_"
+        f"lrD{lr_D}_"
+        f"lrG{lr_G}_"
+        f"smoothR{smooth_real}_"
+        f"smoothF{smooth_fake}"
     )
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     checkpoint_dir = os.path.join(base_ckpt_root, f"{hp_name}_{timestamp}")
     os.makedirs(checkpoint_dir, exist_ok=True)
+
+    # Log hyperparameters
+    with open(os.path.join(checkpoint_dir, "hparams.txt"), "w") as f_hp:
+        f_hp.write(f"lr_D = {lr_D}\n")
+        f_hp.write(f"lr_G = {lr_G}\n")
+        f_hp.write(f"smooth_real = {smooth_real}\n")
+        f_hp.write(f"smooth_fake = {smooth_fake}\n")
+        f_hp.write(f"batch_size = {batch_size}\n")
+        f_hp.write(f"num_epochs = {num_epochs}\n")
+        f_hp.write(f"nz = {nz}, ngf = {ngf}, ndf = {ndf}\n")
+        f_hp.write(f"n_samples = {n_samples}\n")
+        f_hp.write(f"score_cutoff_quantile_train = {score_cutoff}\n")
+        f_hp.write(f"score_cutoff_value_train = {cutoff_train}\n")
 
     steps_per_epoch = len(P) // batch_size
     ckpt_epochs = 100
@@ -571,12 +566,11 @@ if __name__ == "__main__":
         validity_weight=1, diversity_weight=0,
         checkpoint_dir=checkpoint_dir,
         ckpt_interval=ckpt_interval,
+        smooth_real=smooth_real,
+        smooth_fake=smooth_fake,
     )
 
-    # -------------------------
-    # Generate and plot fake samples
-    # -------------------------
-
+    # --- Generate and plot fake samples ---
     netG.eval()
     with torch.no_grad():
         z = torch.randn(batch_size, nz, device=device)
@@ -594,14 +588,12 @@ if __name__ == "__main__":
             idx_vis.cpu().numpy(),
         )
 
-        txt_path = os.path.join(checkpoint_dir, "fake_voxel_conditions.txt")
         with open(txt_path, "w") as f_txt:
             f_txt.write("# idx  filename           condition_vector  condition_string\n")
             for idx in range(batch_size):
                 filename = f"fake_voxel_{idx}.png"
                 fig_path = os.path.join(checkpoint_dir, filename)
                 plot_voxel_grid_3d(fake[idx, 0], title=f"Fake sample {idx}", save_path=fig_path)
-
                 cond_str_num = " ".join(f"{v:.6f}" for v in cond_np[idx])
                 cond_str_human = cond_strs_vis[idx]  # e.g. BCn_3_BCpattern_322_LoadMagBin_1_...
                 f_txt.write(f"{idx:03d}  {filename}  {cond_str_num}  {cond_str_human}\n")
@@ -609,10 +601,7 @@ if __name__ == "__main__":
 
     print(f"Saved voxel plots and fake_voxel_conditions.txt for {batch_size} fake samples.")
 
-    # -------------------------
-    # Evaluate generator by mass+compactness score
-    # -------------------------
-
+    # --- Evaluate generator by mass+compactness score ---
     batches_eval = 10
     all_scores = []
     all_mass = []
@@ -625,8 +614,8 @@ if __name__ == "__main__":
             idx_eval = torch.randint(low=0, high=C_P.shape[0], size=(batch_size,))
             c_eval = C_P[idx_eval].to(device)
 
-            fake = netG(z, c_eval).cpu().numpy()  # [B, 1, D, H, W]
-            fake_bin = (fake > 0).astype(np.float64)
+            fake = netG(z, c_eval).cpu().numpy()
+            fake_bin = (fake > 0.0).astype(np.float64)
             batch_np = fake_bin[:, 0, :, :, :]
 
             score, mass_fracs, comp_vals = score_batch_mass_compactness(
@@ -640,7 +629,7 @@ if __name__ == "__main__":
     all_mass = np.concatenate(all_mass)
     all_comp = np.concatenate(all_comp)
 
-    # Use the same cutoff the generator used to label data
+    # Compare ONLY to the TRAIN cutoff value
     positive_rate = float((all_scores < cutoff_train).mean() * 100.0)
     mean_mass = float(all_mass.mean())
     mean_comp = float(all_comp.mean())
@@ -658,4 +647,3 @@ if __name__ == "__main__":
         f.write(f"Mass+compactness positive rate wrt train cutoff (%): {positive_rate:.4f}\n")
         f.write(f"Mean mass fraction: {mean_mass:.6f}\n")
         f.write(f"Mean compactness: {mean_comp:.6f}\n")
-

@@ -219,10 +219,6 @@ class ReusableDataLoader:
         c_batch = torch.stack([self.C[i] for i in batch_indices])
         return x_batch, c_batch
 
-# -------------------------
-# GAN Step (conditional, MDD) with label smoothing
-# -------------------------
-
 
 def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                          P_batch, N_batch, c_batch, noise_batch,
@@ -235,26 +231,24 @@ def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
       - Fake targets stay at 0.0 (no smoothing on the fake side).
     smooth_fake is kept in the signature but not used here (one-sided).
     """
-    # Discriminator update
+    # ----------------- Discriminator update -----------------
     D.zero_grad()
 
-    # ----- Real positives: target "real" with smoothing -----
+    # Real positives
     out_real_pos = D(P_batch, c_batch)              # [B, 2] logits
     log_probs_real_pos = torch.log_softmax(out_real_pos, dim=1)
-    # Target distribution: fake = 0, real = 1 - smooth_real
     p_real_pos = torch.zeros_like(out_real_pos)
     p_real_pos[:, 1] = 1.0 - smooth_real
     L_D_real = -(p_real_pos * log_probs_real_pos).sum(dim=1).mean()
 
-    # ----- Real negatives: target "fake" (no smoothing) -----
+    # Real negatives
     out_real_neg = D(N_batch, c_batch)
     log_probs_real_neg = torch.log_softmax(out_real_neg, dim=1)
-    # Target distribution: fake = 1, real = 0
     p_real_neg = torch.zeros_like(out_real_neg)
     p_real_neg[:, 0] = 1.0
     L_D_neg = -(p_real_neg * log_probs_real_neg).sum(dim=1).mean()
 
-    # ----- Fake samples: target "fake" (no smoothing) -----
+    # Fake samples
     fake_data = G(noise_batch, c_batch)
     out_fake = D(fake_data.detach(), c_batch)
     log_probs_fake = torch.log_softmax(out_fake, dim=1)
@@ -264,18 +258,35 @@ def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
 
     L_D_tot = L_D_real + L_D_neg + L_D_fake
     L_D_tot.backward()
+
+    # D gradient norm
+    D_grad_norm = 0.0
+    for p in D.parameters():
+        if p.grad is not None:
+            D_grad_norm += p.grad.detach().pow(2).sum().item()
+    D_grad_norm = D_grad_norm ** 0.5
+
     D_opt.step()
 
-    # Generator update
+    # ----------------- Generator update -----------------
     G.zero_grad()
     fake_data = G(noise_batch, c_batch)
     out_fake_for_G = D(fake_data, c_batch)
     log_probs_fake_for_G = torch.log_softmax(out_fake_for_G, dim=1)
+
     # Generator wants D to say "real" with smoothed target
     p_real_for_G = torch.zeros_like(out_fake_for_G)
     p_real_for_G[:, 1] = 1.0 - smooth_real
     L_G = -(p_real_for_G * log_probs_fake_for_G).sum(dim=1).mean()
     L_G.backward()
+
+    # G gradient norm
+    G_grad_norm = 0.0
+    for p in G.parameters():
+        if p.grad is not None:
+            G_grad_norm += p.grad.detach().pow(2).sum().item()
+    G_grad_norm = G_grad_norm ** 0.5
+
     G_opt.step()
 
     report = {
@@ -283,6 +294,8 @@ def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
         "L_D_neg": float(L_D_neg.item()),
         "L_D_fake": float(L_D_fake.item()),
         "L_G": float(L_G.item()),
+        "D_grad_norm": float(D_grad_norm),
+        "G_grad_norm": float(G_grad_norm),
     }
     return report
 
@@ -426,7 +439,7 @@ if __name__ == "__main__":
     nz = 300
     ngf = 256
     ndf = 64
-    num_epochs = 1000
+    num_epochs = 100
 
     # Hyperparameters
     lr_D = 1e-5
@@ -487,6 +500,7 @@ if __name__ == "__main__":
     base_ckpt_root = "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k"
 
     hp_name = (
+        f"ls_"
         f"epochs{num_epochs}_"
         f"bs{batch_size}_"
         f"nz{nz}_"
