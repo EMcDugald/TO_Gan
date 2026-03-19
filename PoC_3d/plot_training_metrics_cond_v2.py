@@ -1,13 +1,26 @@
 import sys
 import os
+import re
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
-import re
+
 
 # Optional hard-coded run
-# HARD_CODED_DIR = "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k/epochs2000_bs8_nz200_ngf128_ndf128_nsamp10000_20260212-XXXXXX"
-HARD_CODED_DIR = "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k/epochs1000_bs32_nz200_ngf128_ndf128_nsamp5000_20260219-155218"
+HARD_CODED_DIR = (
+    "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k/"
+    "ls_epochs1000_bs32_nz300_ngf256_ndf64_nsamp10000_lrD0.0002_lrG0.0002_smoothR0.1_smoothF0.0_20260317-152035"
+)
+# HARD_CODED_DIR = (
+#     "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k/"
+#     "ls_ratio_div_epochs1000_bs32_nz300_ngf256_ndf64_nsamp10000_lrD1e-05_lrG0.0002_smoothR0.1_smoothF0.0_20260317-152035"
+# )
+# HARD_CODED_DIR = (
+#     "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k/"
+#     "to_cond_gan/checkpoints_323232_10k/ls_ratio_epochs1000_bs32_nz300_ngf256_ndf64_nsamp10000_lrD0.0002_lrG0.0002_smoothR0.1_smoothF0.0_20260317-152035"
+# )
+
 
 
 def parse_steps_per_epoch(dirname):
@@ -15,8 +28,8 @@ def parse_steps_per_epoch(dirname):
     Parse 'bsX' and 'nsampY' from a checkpoint directory name and
     infer steps_per_epoch = nsamp / bs.
     """
-    m_bs = re.search(r'bs(\d+)', dirname)
-    m_ns = re.search(r'nsamp(\d+)', dirname)
+    m_bs = re.search(r"bs(\d+)", dirname)
+    m_ns = re.search(r"nsamp(\d+)", dirname)
     if m_bs and m_ns:
         batch_size = int(m_bs.group(1))
         n_samples = int(m_ns.group(1))
@@ -59,14 +72,18 @@ print(f"steps_per_epoch = {steps_per_epoch}")
 # Load metrics
 # -------------------------
 
-df = pd.read_csv(metrics_path).dropna()
+df = pd.read_csv(metrics_path)
+print(f"Columns in metrics.csv: {list(df.columns)}")
 actual_num_steps = len(df)
-print(f"Actual steps in metrics.csv: {actual_num_steps}")
+print(f"Actual rows in metrics.csv: {actual_num_steps}")
 
-# Use stored epoch if present, otherwise compute it
+# Ensure numeric dtypes
+df["step"] = df["step"].astype(float)
+
 if "epoch" in df.columns:
     df["epoch"] = df["epoch"].astype(float)
 else:
+    # Fallback for legacy files without epoch
     df["epoch"] = df["step"] / steps_per_epoch
 
 approx_epochs = df["epoch"].max()
