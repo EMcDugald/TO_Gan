@@ -8,10 +8,10 @@ import numpy as np
 
 
 # Optional hard-coded run
-HARD_CODED_DIR = (
-    "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k/"
-    "ls_epochs1000_bs32_nz300_ngf256_ndf64_nsamp10000_lrD0.0002_lrG0.0002_smoothR0.1_smoothF0.0_20260317-152035"
-)
+# HARD_CODED_DIR = (
+#     "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k/"
+#     "ls_epochs1000_bs32_nz300_ngf256_ndf64_nsamp10000_lrD0.0002_lrG0.0002_smoothR0.1_smoothF0.0_20260317-152035"
+# )
 # HARD_CODED_DIR = (
 #     "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k/"
 #     "ls_ratio_div_epochs1000_bs32_nz300_ngf256_ndf64_nsamp10000_lrD1e-05_lrG0.0002_smoothR0.1_smoothF0.0_20260317-152035"
@@ -20,6 +20,8 @@ HARD_CODED_DIR = (
 #     "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k/"
 #     "to_cond_gan/checkpoints_323232_10k/ls_ratio_epochs1000_bs32_nz300_ngf256_ndf64_nsamp10000_lrD0.0002_lrG0.0002_smoothR0.1_smoothF0.0_20260317-152035"
 # )
+
+HARD_CODED_DIR = ("/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k/ls_epochs1000_bs32_nz300_ngf256_ndf64_nsamp10000_lrD0.0002_lrG0.0002_smoothR0.1_smoothF0.0_20260319-211556")
 
 
 

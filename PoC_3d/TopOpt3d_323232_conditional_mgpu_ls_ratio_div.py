@@ -127,6 +127,19 @@ def score_batch_mass_compactness(batch_np, m_min, m_max, c_min, c_max):
     score = 0.5 * m_norm + 0.5 * c_norm
     return score, mass_fracs, comp_vals
 
+def diversity_loss(x):
+    # x: [B, F] features. For voxels, you may want to flatten or embed first.
+    r = torch.sum(x ** 2, dim=1, keepdim=True)
+    D = r - 2 * torch.matmul(x, x.T) + r.T
+    S = torch.exp(-0.5 * D ** 2)
+    try:
+        eig_val = torch.linalg.eigvalsh(S)
+    except:
+        eig_val = torch.ones(x.size(0), device=x.device)
+    loss = -torch.mean(torch.log(torch.clamp(eig_val, min=1e-7)))
+    return loss
+
+
 # -------------------------
 # Conditional models
 # -------------------------
@@ -220,67 +233,80 @@ class ReusableDataLoader:
         return x_batch, c_batch
 
 
+
 def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                          P_batch, N_batch, c_batch, noise_batch,
                          batch_size, device,
-                         validity_weight=None, diversity_weight=0,
-                         smooth_real=0.1, smooth_fake=0.0):
+                         validity_weight=None, diversity_weight=0.05,
+                         smooth_real=0.1, smooth_fake=0.0,
+                         d_update=True):
     """
-    One-sided label smoothing:
-      - Real targets use 1 - smooth_real (e.g. 0.9) instead of 1.0.
-      - Fake targets stay at 0.0 (no smoothing on the fake side).
-    smooth_fake is kept in the signature but not used here (one-sided).
+    One-sided label smoothing + optional diversity loss.
+    d_update controls whether D is actually updated on this step.
     """
-    # ----------------- Discriminator update -----------------
-    D.zero_grad()
 
-    # Real positives
-    out_real_pos = D(P_batch, c_batch)              # [B, 2] logits
-    log_probs_real_pos = torch.log_softmax(out_real_pos, dim=1)
-    p_real_pos = torch.zeros_like(out_real_pos)
-    p_real_pos[:, 1] = 1.0 - smooth_real
-    L_D_real = -(p_real_pos * log_probs_real_pos).sum(dim=1).mean()
+    # ----------------- Discriminator update (maybe) -----------------
+    if d_update:
+        D.zero_grad()
 
-    # Real negatives
-    out_real_neg = D(N_batch, c_batch)
-    log_probs_real_neg = torch.log_softmax(out_real_neg, dim=1)
-    p_real_neg = torch.zeros_like(out_real_neg)
-    p_real_neg[:, 0] = 1.0
-    L_D_neg = -(p_real_neg * log_probs_real_neg).sum(dim=1).mean()
+        # Real positives
+        out_real_pos = D(P_batch, c_batch)
+        log_probs_real_pos = torch.log_softmax(out_real_pos, dim=1)
+        p_real_pos = torch.zeros_like(out_real_pos)
+        p_real_pos[:, 1] = 1.0 - smooth_real
+        L_D_real = -(p_real_pos * log_probs_real_pos).sum(dim=1).mean()
 
-    # Fake samples
-    fake_data = G(noise_batch, c_batch)
-    out_fake = D(fake_data.detach(), c_batch)
-    log_probs_fake = torch.log_softmax(out_fake, dim=1)
-    p_fake = torch.zeros_like(out_fake)
-    p_fake[:, 0] = 1.0      # fake = 1, real = 0
-    L_D_fake = -(p_fake * log_probs_fake).sum(dim=1).mean()
+        # Real negatives
+        out_real_neg = D(N_batch, c_batch)
+        log_probs_real_neg = torch.log_softmax(out_real_neg, dim=1)
+        p_real_neg = torch.zeros_like(out_real_neg)
+        p_real_neg[:, 0] = 1.0
+        L_D_neg = -(p_real_neg * log_probs_real_neg).sum(dim=1).mean()
 
-    L_D_tot = L_D_real + L_D_neg + L_D_fake
-    L_D_tot.backward()
+        # Fake samples
+        fake_data_for_D = G(noise_batch, c_batch)
+        out_fake = D(fake_data_for_D.detach(), c_batch)
+        log_probs_fake = torch.log_softmax(out_fake, dim=1)
+        p_fake = torch.zeros_like(out_fake)
+        p_fake[:, 0] = 1.0
+        L_D_fake = -(p_fake * log_probs_fake).sum(dim=1).mean()
 
-    # D gradient norm
-    D_grad_norm = 0.0
-    for p in D.parameters():
-        if p.grad is not None:
-            D_grad_norm += p.grad.detach().pow(2).sum().item()
-    D_grad_norm = D_grad_norm ** 0.5
+        L_D_tot = L_D_real + L_D_neg + L_D_fake
+        L_D_tot.backward()
 
-    D_opt.step()
+        D_grad_norm = 0.0
+        for p in D.parameters():
+            if p.grad is not None:
+                D_grad_norm += p.grad.detach().pow(2).sum().item()
+        D_grad_norm = D_grad_norm ** 0.5
 
-    # ----------------- Generator update -----------------
+        D_opt.step()
+    else:
+        L_D_real = torch.tensor(0.0, device=device)
+        L_D_neg  = torch.tensor(0.0, device=device)
+        L_D_fake = torch.tensor(0.0, device=device)
+        D_grad_norm = 0.0
+
+    # ----------------- Generator update (always) -----------------
     G.zero_grad()
     fake_data = G(noise_batch, c_batch)
     out_fake_for_G = D(fake_data, c_batch)
     log_probs_fake_for_G = torch.log_softmax(out_fake_for_G, dim=1)
 
-    # Generator wants D to say "real" with smoothed target
     p_real_for_G = torch.zeros_like(out_fake_for_G)
     p_real_for_G[:, 1] = 1.0 - smooth_real
     L_G = -(p_real_for_G * log_probs_fake_for_G).sum(dim=1).mean()
-    L_G.backward()
 
-    # G gradient norm
+    if diversity_weight is not None and diversity_weight > 0:
+        feat = fake_data.view(fake_data.size(0), -1)
+        L_div = diversity_loss(feat)
+        L_G_tot = L_G + diversity_weight * L_div
+    else:
+        L_div = None
+        L_G_tot = L_G
+
+    L_G_tot.backward()
+
     G_grad_norm = 0.0
     for p in G.parameters():
         if p.grad is not None:
@@ -297,8 +323,9 @@ def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
         "D_grad_norm": float(D_grad_norm),
         "G_grad_norm": float(G_grad_norm),
     }
+    if L_div is not None:
+        report["L_div"] = float(L_div.item())
     return report
-
 
 
 
@@ -325,229 +352,48 @@ def save_checkpoint(step, netG, netD, G_opt, D_opt, path):
         path,
     )
 
-def load_checkpoint(path, netG, netD, G_opt, D_opt, device):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"No checkpoint found at {path}")
-    ckpt = torch.load(path, map_location=device)
-
-    netG.load_state_dict(ckpt["netG_state"])
-    netD.load_state_dict(ckpt["netD_state"])
-    G_opt.load_state_dict(ckpt["G_opt_state"])
-    D_opt.load_state_dict(ckpt["D_opt_state"])
-
-    # Ensure optimizer tensors are on the right device
-    for opt in (G_opt, D_opt):
-        for state in opt.state.values():
-            for k, v in state.items():
-                if isinstance(v, torch.Tensor):
-                    state[k] = v.to(device)
-
-    start_step = ckpt.get("step", 0)
-    return netG, netD, G_opt, D_opt, start_step
-
-
 # -------------------------
 # Training loop with metrics
 # -------------------------
 
-# def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
-#                   P_loader, N_loader,
-#                   num_steps, batch_size, noise_dim,
-#                   train_step_fn, device,
-#                   validity_weight, diversity_weight=0,
-#                   checkpoint_dir=None, ckpt_interval=None,
-#                   smooth_real=0.1, smooth_fake=0.0):
-# def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
-#                   P_loader, N_loader,
-#                   num_steps, batch_size, noise_dim,
-#                   train_step_fn, device,
-#                   validity_weight, diversity_weight=0,
-#                   checkpoint_dir=None, ckpt_interval=None,
-#                   smooth_real=0.1, smooth_fake=0.0,
-#                   C_P_full=None, cond_strs=None,
-#                   eval_every_steps=None, nz=None, start_step=0):
 
-#     best_G_loss = float("inf")
-    
-#     metrics_file = None
-#     metrics_writer = None
-#     if checkpoint_dir is not None:
-#         os.makedirs(checkpoint_dir, exist_ok=True)
-#         metrics_path = os.path.join(checkpoint_dir, "metrics.csv")
-#         metrics_file = open(metrics_path, "w", newline="")
-#         metrics_writer = csv.writer(metrics_file)
-#         metrics_writer.writerow(
-#             ["step", "epoch",
-#             "L_D_real", "L_D_neg", "L_D_fake",
-#             "L_G", "D_grad_norm", "G_grad_norm"]
-#         )
+def train_3d_cond_ls_ratio(D, G, A, D_opt, G_opt, A_opt,
+                           P_loader, N_loader,
+                           num_steps, batch_size, noise_dim,
+                           train_step_fn, device,
+                           validity_weight, diversity_weight=0,
+                           checkpoint_dir=None, ckpt_interval=None,
+                           smooth_real=0.1, smooth_fake=0.0,
+                           C_P_full=None, cond_strs=None,
+                           eval_every_steps=None, nz=None,
+                           d_every=1):
+    """
+    Label-smoothing trainer with adjustable D:G update ratio.
 
-#     steps_range = trange(start_step, num_steps, position=0, leave=True)
-#     for step in steps_range:
-#         P_batch, cP = P_loader.get_batch()
-#         N_batch, cN = N_loader.get_batch()
-
-#         c_batch = cP.to(device)
-
-#         P_batch = P_batch.to(device)
-#         N_batch = N_batch.to(device)
-
-#         noise_batch = torch.randn(batch_size, noise_dim, device=device)
-
-#         report = train_step_fn(
-#             D, G, A, D_opt, G_opt, A_opt,
-#             P_batch, N_batch, c_batch, noise_batch,
-#             batch_size, device,
-#             validity_weight=validity_weight,
-#             diversity_weight=diversity_weight,
-#             smooth_real=smooth_real,
-#             smooth_fake=smooth_fake,
-#         )
-
-#         postfix = {key: "{:.4f}".format(value) for key, value in report.items()}
-#         steps_range.set_postfix(postfix)
-
-#         if metrics_writer is not None:
-#             steps_per_epoch = len(P_loader.X) // batch_size
-#             epoch = step // steps_per_epoch
-
-#             metrics_writer.writerow([
-#                 step + 1,
-#                 epoch,
-#                 report.get("L_D_real", float("nan")),
-#                 report.get("L_D_neg", float("nan")),
-#                 report.get("L_D_fake", float("nan")),
-#                 report.get("L_G", float("nan")),
-#                 report.get("D_grad_norm", float("nan")),
-#                 report.get("G_grad_norm", float("nan")),
-#             ])
-
-
-
-#         current_G_loss = report.get("L_G", None)
-#         if checkpoint_dir is not None and current_G_loss is not None:
-#             if current_G_loss < best_G_loss:
-#                 best_G_loss = current_G_loss
-#                 best_ckpt_path = os.path.join(checkpoint_dir, "ckpt_best.pt")
-#                 save_checkpoint(step + 1, G, D, G_opt, D_opt, best_ckpt_path)
-
-#         if checkpoint_dir is not None and ckpt_interval is not None:
-#             if (step + 1) % ckpt_interval == 0:
-#                 ckpt_path = os.path.join(checkpoint_dir, f"ckpt_step_{step+1}.pt")
-#                 save_checkpoint(step + 1, G, D, G_opt, D_opt, ckpt_path)
-
-#         # --- Periodic fake sample generation every eval_every_steps ---
-#         if (checkpoint_dir is not None and
-#             eval_every_steps is not None and
-#             C_P_full is not None and
-#             cond_strs is not None and
-#             nz is not None and
-#             (step + 1) % eval_every_steps == 0):
-
-#             steps_per_epoch = len(P_loader.X) // batch_size
-#             current_epoch = (step + 1) // steps_per_epoch
-
-#             samples_subdir = os.path.join(
-#                 checkpoint_dir, f"epoch_{current_epoch:04d}"
-#             )
-#             os.makedirs(samples_subdir, exist_ok=True)
-
-#             G_raw = unwrap_module(G)
-#             G_raw.eval()
-#             with torch.no_grad():
-#                 num_vis = 10
-#                 z = torch.randn(num_vis, nz, device=device)
-#                 idx_vis = torch.randint(
-#                     low=0,
-#                     high=C_P_full.shape[0],
-#                     size=(num_vis,),
-#                 )
-#                 c_vis = C_P_full[idx_vis].to(device)
-#                 fake = G_raw(z, c_vis).cpu().numpy()
-
-#                 cond_np = c_vis.cpu().numpy()
-#                 cond_strs_vis = [
-#                     cond_strs[int(i)] for i in idx_vis.cpu().numpy()
-#                 ]
-
-#             np.save(
-#                 os.path.join(samples_subdir, "fake_conditions.npy"),
-#                 cond_np,
-#             )
-#             np.save(
-#                 os.path.join(samples_subdir, "fake_indices.npy"),
-#                 idx_vis.cpu().numpy(),
-#             )
-
-#             txt_path = os.path.join(
-#                 samples_subdir, "fake_voxel_conditions.txt"
-#             )
-#             with open(txt_path, "w") as f_txt:
-#                 f_txt.write(
-#                     "# idx  filename           condition_vector  condition_string\n"
-#                 )
-#                 for i in range(num_vis):
-#                     filename = f"fake_voxel_{i}.png"
-#                     fig_path = os.path.join(samples_subdir, filename)
-#                     plot_voxel_grid_3d(
-#                         fake[i, 0],
-#                         title=f"Fake sample {i} (epoch {current_epoch})",
-#                         save_path=fig_path,
-#                     )
-#                     cond_str_num = " ".join(
-#                         f"{v:.6f}" for v in cond_np[i]
-#                     )
-#                     cond_str_human = cond_strs_vis[i]
-#                     f_txt.write(
-#                         f"{i:03d}  {filename}  {cond_str_num}  {cond_str_human}\n"
-#                     )
-
-#             G_raw.train()
-
-
-
-#     if checkpoint_dir is not None:
-#         ckpt_path = os.path.join(checkpoint_dir, "ckpt_final.pt")
-#         save_checkpoint(num_steps, G, D, G_opt, D_opt, ckpt_path)
-
-#     if metrics_file is not None:
-#         metrics_file.close()
-
-#     return D, G, A
-
-def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
-                  P_loader, N_loader,
-                  num_steps, batch_size, noise_dim,
-                  train_step_fn, device,
-                  validity_weight, diversity_weight=0,
-                  checkpoint_dir=None, ckpt_interval=None,
-                  smooth_real=0.1, smooth_fake=0.0,
-                  C_P_full=None, cond_strs=None,
-                  eval_every_steps=None, nz=None,
-                  start_step=0):
+    d_every = 1 -> update D every step (same as standard trainer)
+    d_every = 2 -> update D on steps 2,4,6,... while G updates every step
+    """
 
     best_G_loss = float("inf")
-
-    steps_per_epoch = len(P_loader.X) // batch_size
 
     metrics_file = None
     metrics_writer = None
     if checkpoint_dir is not None:
         os.makedirs(checkpoint_dir, exist_ok=True)
         metrics_path = os.path.join(checkpoint_dir, "metrics.csv")
-
-        # If resuming in the same dir, append and only write header on fresh run
-        mode = "a" if start_step > 0 and os.path.exists(metrics_path) else "w"
-        metrics_file = open(metrics_path, mode, newline="")
+        metrics_file = open(metrics_path, "w", newline="")
         metrics_writer = csv.writer(metrics_file)
-        if mode == "w":
-            metrics_writer.writerow(
-                ["step", "epoch",
-                 "L_D_real", "L_D_neg", "L_D_fake",
-                 "L_G", "D_grad_norm", "G_grad_norm"]
-            )
+        # metrics_writer.writerow(
+        #     ["step", "epoch", "L_D_real", "L_D_neg", "L_D_fake", "L_G"]
+        # )
+        metrics_writer.writerow(
+            ["step", "epoch", "L_D_real", "L_D_neg", "L_D_fake", "L_G",
+            "D_grad_norm", "G_grad_norm"]
+                )
 
-    steps_range = trange(start_step, num_steps, position=0, leave=True)
+    steps_range = trange(num_steps, position=0, leave=True)
+    steps_per_epoch = len(P_loader.X) // batch_size
+
     for step in steps_range:
         P_batch, cP = P_loader.get_batch()
         N_batch, cN = N_loader.get_batch()
@@ -555,8 +401,10 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
         c_batch = cP.to(device)
         P_batch = P_batch.to(device)
         N_batch = N_batch.to(device)
-
         noise_batch = torch.randn(batch_size, noise_dim, device=device)
+
+        # Decide whether to update D this step
+        d_update = ((step + 1) % d_every == 0)
 
         report = train_step_fn(
             D, G, A, D_opt, G_opt, A_opt,
@@ -566,6 +414,7 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
             diversity_weight=diversity_weight,
             smooth_real=smooth_real,
             smooth_fake=smooth_fake,
+            d_update=d_update,  # new flag your LS GAN step needs
         )
 
         postfix = {key: "{:.4f}".format(value) for key, value in report.items()}
@@ -577,9 +426,9 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                 step + 1,
                 epoch,
                 report.get("L_D_real", float("nan")),
-                report.get("L_D_neg",  float("nan")),
+                report.get("L_D_neg", float("nan")),
                 report.get("L_D_fake", float("nan")),
-                report.get("L_G",      float("nan")),
+                report.get("L_G", float("nan")),
                 report.get("D_grad_norm", float("nan")),
                 report.get("G_grad_norm", float("nan")),
             ])
@@ -596,7 +445,7 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                 ckpt_path = os.path.join(checkpoint_dir, f"ckpt_step_{step+1}.pt")
                 save_checkpoint(step + 1, G, D, G_opt, D_opt, ckpt_path)
 
-        # --- Periodic fake sample generation every eval_every_steps ---
+        # --- periodic sampling, identical to your existing trainer ---
         if (checkpoint_dir is not None and
             eval_every_steps is not None and
             C_P_full is not None and
@@ -605,7 +454,6 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
             (step + 1) % eval_every_steps == 0):
 
             current_epoch = (step + 1) // steps_per_epoch
-
             samples_subdir = os.path.join(
                 checkpoint_dir, f"epoch_{current_epoch:04d}"
             )
@@ -638,9 +486,7 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                 idx_vis.cpu().numpy(),
             )
 
-            txt_path = os.path.join(
-                samples_subdir, "fake_voxel_conditions.txt"
-            )
+            txt_path = os.path.join(samples_subdir, "fake_voxel_conditions.txt")
             with open(txt_path, "w") as f_txt:
                 f_txt.write(
                     "# idx  filename           condition_vector  condition_string\n"
@@ -711,7 +557,7 @@ if __name__ == "__main__":
     num_epochs = 1000
 
     # Hyperparameters
-    lr_D = 2e-4
+    lr_D = 1e-5
     lr_G = 2e-4
     smooth_real = 0.1
     smooth_fake = 0.0
@@ -753,36 +599,8 @@ if __name__ == "__main__":
 
     if device.type == "cuda" and torch.cuda.device_count() > 1:
         print(f"Using DataParallel on {torch.cuda.device_count()} GPUs")
-
-    # netG = netG.to(device)
-    # netD = netD.to(device)
-
-    # P_loader = ReusableDataLoader(P, C_P, batch_size)
-    # N_loader = ReusableDataLoader(N, C_N, batch_size)
-    # num_steps = num_epochs * len(P) // batch_size
-
-    # D_opt = optim.Adam(netD.parameters(), lr=lr_D, betas=(0.5, 0.999))
-    # G_opt = optim.Adam(netG.parameters(), lr=lr_G, betas=(0.5, 0.999))
-
-    # base_ckpt_root = "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k"
-
-    # hp_name = (
-    #     f"ls_"
-    #     f"epochs{num_epochs}_"
-    #     f"bs{batch_size}_"
-    #     f"nz{nz}_"
-    #     f"ngf{ngf}_"
-    #     f"ndf{ndf}_"
-    #     f"nsamp{n_samples}_"
-    #     f"lrD{lr_D}_"
-    #     f"lrG{lr_G}_"
-    #     f"smoothR{smooth_real}_"
-    #     f"smoothF{smooth_fake}"
-    # )
-
-    # timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    # checkpoint_dir = os.path.join(base_ckpt_root, f"{hp_name}_{timestamp}")
-    # os.makedirs(checkpoint_dir, exist_ok=True)
+        # netG = nn.DataParallel(netG)
+        # netD = nn.DataParallel(netD)
 
     netG = netG.to(device)
     netD = netD.to(device)
@@ -797,7 +615,7 @@ if __name__ == "__main__":
     base_ckpt_root = "/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_10k"
 
     hp_name = (
-        f"ls_"
+        f"ls_ratio_div_"
         f"epochs{num_epochs}_"
         f"bs{batch_size}_"
         f"nz{nz}_"
@@ -813,20 +631,6 @@ if __name__ == "__main__":
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     checkpoint_dir = os.path.join(base_ckpt_root, f"{hp_name}_{timestamp}")
     os.makedirs(checkpoint_dir, exist_ok=True)
-
-    # --------- RESUME LOGIC ---------
-    # Set this to an existing checkpoint path when you want to resume; otherwise leave as None.
-    resume_path = None
-    start_step = 0
-    if resume_path is not None:
-        print(f"Resuming from checkpoint: {resume_path}")
-        netG, netD, G_opt, D_opt, start_step = load_checkpoint(
-            resume_path, netG, netD, G_opt, D_opt, device
-        )
-    else:
-        print("Starting from scratch")
-    # -------------------------------
-
 
     # Log hyperparameters
     with open(os.path.join(checkpoint_dir, "hparams.txt"), "w") as f_hp:
@@ -844,44 +648,28 @@ if __name__ == "__main__":
     steps_per_epoch = len(P) // batch_size
     ckpt_epochs = 100
     ckpt_interval = ckpt_epochs * steps_per_epoch
-    eval_every_epochs = 10  # or whatever you want
+    eval_every_epochs = 10  # choose how often to snapshot
     eval_every_steps = eval_every_epochs * steps_per_epoch
 
-    # netD, netG, _ = train_3d_cond(
-    #     netD, netG, None,
-    #     D_opt, G_opt, None,
-    #     P_loader, N_loader,
-    #     num_steps, batch_size, nz,
-    #     GAN_step_MDD_3d_cond, device,
-    #     validity_weight=1, diversity_weight=0,
-    #     checkpoint_dir=checkpoint_dir,
-    #     ckpt_interval=ckpt_interval,
-    #     smooth_real=smooth_real,
-    #     smooth_fake=smooth_fake,
-    #     C_P_full=C_P,                 # full positive condition matrix
-    #     cond_strs=dataset.cond_strs,  # human-readable condition strings
-    #     eval_every_steps=eval_every_steps,
-    #     nz=nz,
-    # )
+    d_every = 3  # example: D updates every 3rd step, G every step
 
-    netD, netG, _ = train_3d_cond(
-        netD, netG, None,
-        D_opt, G_opt, None,
-        P_loader, N_loader,
-        num_steps, batch_size, nz,
-        GAN_step_MDD_3d_cond, device,
-        validity_weight=1, diversity_weight=0,
-        checkpoint_dir=checkpoint_dir,
-        ckpt_interval=ckpt_interval,
-        smooth_real=smooth_real,
-        smooth_fake=smooth_fake,
-        C_P_full=C_P,
-        cond_strs=dataset.cond_strs,
-        eval_every_steps=eval_every_steps,
-        nz=nz,
-        start_step=start_step,   # <-- NEW
-    )
-
+    netD, netG, _ = train_3d_cond_ls_ratio(
+    netD, netG, None,
+    D_opt, G_opt, None,
+    P_loader, N_loader,
+    num_steps, batch_size, nz,
+    GAN_step_MDD_3d_cond, device,
+    validity_weight=1, diversity_weight=0.05,
+    checkpoint_dir=checkpoint_dir,
+    ckpt_interval=ckpt_interval,
+    smooth_real=smooth_real,
+    smooth_fake=smooth_fake,
+    C_P_full=C_P,
+    cond_strs=dataset.cond_strs,
+    eval_every_steps=eval_every_steps,
+    nz=nz,
+    d_every=d_every,
+)
 
 
     # --- Generate and plot fake samples ---
