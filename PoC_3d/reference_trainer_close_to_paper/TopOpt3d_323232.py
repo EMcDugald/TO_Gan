@@ -387,21 +387,6 @@ num_steps = num_epochs * len(P) // batch_size
 D_opt = optim.Adam(netD.parameters(), lr=0.0002, betas=(0.5, 0.999))
 G_opt = optim.Adam(netG.parameters(), lr=0.0002, betas=(0.5, 0.999))
 
-# -------------------------
-# Hyperparameter-based directory
-# -------------------------
-
-# base_ckpt_root = "/xdisk/hdb/emcdugald/to_gan/checkpoints_323232_10k"
-
-# # include key hyperparams in directory name
-# hp_name = (
-#     f"epochs{num_epochs}_"
-#     f"bs{batch_size}_"
-#     f"nz{nz}_"
-#     f"ngf{ngf}_"
-#     f"ndf{ndf}_"
-#     f"nsamp{n_samples}"
-# )
 
 base_ckpt_root = "/xdisk/hdb/emcdugald/to_gan/checkpoints_323232_10k"
 

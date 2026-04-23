@@ -288,7 +288,7 @@ def train_dcgan_3d(
 
 
 if __name__ == "__main__":
-    data_path = "/xdisk/hdb/emcdugald/simple_gan/train_data/323232/15000_uncond_voxels_32x32x32.npy"
+    data_path = "/xdisk/hdb/emcdugald/simple_gan/train_data/323232/5000_uncond_voxels_32x32x32.npy"
 
     batch_size = 64
     nz = 300
@@ -299,7 +299,7 @@ if __name__ == "__main__":
     lr_D = 2e-4
     lr_G = 2e-4
     smooth_real = 0.1
-    d_every = 1
+    d_every = 2
 
     dataset = VoxelDataset(data_path)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=0)

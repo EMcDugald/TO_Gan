@@ -6,21 +6,100 @@ DATA_ROOT = "/home/u26/emcdugald/TO_Gan/TO_3D_data_scratch/data"
 OUTPUT_ROOT = "/home/u26/emcdugald/TO_Gan/TO_3D_data_scratch/octant_mass_catalog_323232"
 TARGET_SHAPE = (32, 32, 32)
 
-N_MASS_BINS = 10
+N_MASS_BINS = 5
 MAX_TOTAL_PLOTS = 500
-N_REP_PER_BIN = 5
+N_REP_PER_BIN = 3
 
 os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
 
-def plot_voxel(binary_arr, save_path, title=""):
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection="3d")
-    ax.voxels(binary_arr, edgecolor="k", linewidth=0.2)
-    ax.set_title(title)
-    plt.axis("off")
+def plot_voxel(binary_arr, save_path, title="", bc_arr=None,
+               show_octants=True, show_octant_centers=True, show_bcs=True):
+    binary_arr = np.asarray(binary_arr)
+    nx, ny, nz = binary_arr.shape
+
+    # Assume BC coordinates already live in the global unit cube [0,1]^3
+    bc_pts = None
+    if show_bcs and bc_arr is not None:
+        bc = np.asarray(bc_arr, dtype=float)
+        if bc.ndim == 2 and bc.shape[1] >= 3:
+            pts = bc[:, :3]
+            bc_pts = np.column_stack([
+                pts[:, 0] * (nx - 1),
+                pts[:, 1] * (ny - 1),
+                pts[:, 2] * (nz - 1),
+            ])
+
+    fig = plt.figure(figsize=(18, 6))
+    views = [
+        (25, 35,  "View 1"),
+        (25, 125, "View 2"),
+        (65, 35,  "View 3"),
+    ]
+
+    for k, (elev, azim, subtitle) in enumerate(views, start=1):
+        ax = fig.add_subplot(1, 3, k, projection="3d")
+        ax.voxels(binary_arr > 0, edgecolor="k", linewidth=0.2, alpha=0.75)
+
+        ax.set_xlim(0, nx)
+        ax.set_ylim(0, ny)
+        ax.set_zlim(0, nz)
+
+        # -----------------------------------
+        # Octant overlay: three mid-plane outlines
+        # -----------------------------------
+        if show_octants:
+            mx, my, mz = nx / 2.0, ny / 2.0, nz / 2.0
+            line_kw = dict(color="limegreen", linestyle="--", linewidth=1.2, alpha=0.55)
+
+            # Plane x = mx
+            ax.plot([mx, mx], [0, ny], [0, 0], **line_kw)
+            ax.plot([mx, mx], [0, ny], [nz, nz], **line_kw)
+            ax.plot([mx, mx], [0, 0], [0, nz], **line_kw)
+            ax.plot([mx, mx], [ny, ny], [0, nz], **line_kw)
+
+            # Plane y = my
+            ax.plot([0, nx], [my, my], [0, 0], **line_kw)
+            ax.plot([0, nx], [my, my], [nz, nz], **line_kw)
+            ax.plot([0, 0], [my, my], [0, nz], **line_kw)
+            ax.plot([nx, nx], [my, my], [0, nz], **line_kw)
+
+            # Plane z = mz
+            ax.plot([0, nx], [0, 0], [mz, mz], **line_kw)
+            ax.plot([0, nx], [ny, ny], [mz, mz], **line_kw)
+            ax.plot([0, 0], [0, ny], [mz, mz], **line_kw)
+            ax.plot([nx, nx], [0, ny], [mz, mz], **line_kw)
+
+        # -----------------------------------
+        # Octant center markers
+        # -----------------------------------
+        if show_octant_centers:
+            xs = [nx*0.25, nx*0.25, nx*0.25, nx*0.25, nx*0.75, nx*0.75, nx*0.75, nx*0.75]
+            ys = [ny*0.25, ny*0.25, ny*0.75, ny*0.75, ny*0.25, ny*0.25, ny*0.75, ny*0.75]
+            zs = [nz*0.25, nz*0.75, nz*0.25, nz*0.75, nz*0.25, nz*0.75, nz*0.25, nz*0.75]
+            ax.scatter(xs, ys, zs, c="black", s=12, depthshade=False)
+
+        # -----------------------------------
+        # Boundary condition markers
+        # -----------------------------------
+        if bc_pts is not None:
+            ax.scatter(
+                bc_pts[:, 0], bc_pts[:, 1], bc_pts[:, 2],
+                c="red", s=28, marker="o",
+                edgecolors="white", linewidths=0.5,
+                depthshade=False
+            )
+
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_title(subtitle)
+        ax.set_box_aspect((nx, ny, nz))
+        ax.set_axis_off()
+
+    fig.suptitle(title)
+    plt.tight_layout()
     plt.savefig(save_path, bbox_inches="tight", dpi=200)
     plt.close(fig)
+
 
 
 def mass_fraction(voxel_arr):
@@ -49,16 +128,11 @@ def bc_octant_code(bc_arr):
     if bc.ndim != 2 or bc.shape[1] < 3:
         raise ValueError(f"Unexpected BC array shape: {bc.shape}")
 
+    # Assume BC coordinates already live in the global unit cube [0,1]^3
     pts = bc[:, :3]
 
-    mins = pts.min(axis=0)
-    maxs = pts.max(axis=0)
-    spans = np.where((maxs - mins) > 0, maxs - mins, 1.0)
-
-    norm = (pts - mins) / spans
-
     octants = np.zeros(8, dtype=int)
-    for x, y, z in norm:
+    for x, y, z in pts:
         ix = 1 if x >= 0.5 else 0
         iy = 1 if y >= 0.5 else 0
         iz = 1 if z >= 0.5 else 0
@@ -148,7 +222,7 @@ def main():
             assert shape == TARGET_SHAPE, f"Unexpected shape {shape} at idx {idx}"
             voxel_arr = topo[idx].astype(int).reshape(shape)
             out_png = os.path.join(group_dir, f"voxel_{idx}_rep{j}.png")
-            plot_voxel(voxel_arr, out_png, title=f"idx={idx}, key={key}")
+            plot_voxel(voxel_arr, out_png, title=f"idx={idx}, key={key}", bc_arr=bcs[idx])
 
     hist_path = os.path.join(OUTPUT_ROOT, "mass_fraction_histogram.png")
     plt.figure()

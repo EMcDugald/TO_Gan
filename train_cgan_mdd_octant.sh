@@ -20,4 +20,4 @@ $PYTHON -c "import sys; print('sys.executable:', sys.executable)"
 $PYTHON -c "import torch; print('torch version in job:', torch.__version__)"
 $PYTHON -c "import torch; print('CUDA available:', torch.cuda.is_available(), 'GPUs:', torch.cuda.device_count())"
 
-$PYTHON PoC_3d/train_gan_mdd_323232_octant_labels.py
+$PYTHON PoC_3d/train_GAN_MDD_323232_octant_labels.py

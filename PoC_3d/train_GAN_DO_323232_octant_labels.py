@@ -100,6 +100,21 @@ def diversity_loss(x):
     return loss
 
 
+def eval_dpp_div_from_voxels(batch_np, device):
+    """
+    batch_np: numpy array [B, D, H, W], binarized (0/1 or bool).
+    Returns a scalar DPP diversity score (higher = more diverse).
+    """
+    # Flatten each voxel grid to a vector
+    x = torch.tensor(
+        batch_np.reshape(batch_np.shape[0], -1),
+        dtype=torch.float32,
+        device=device,
+    )
+    return float(diversity_loss(x).item())
+    
+
+
 class CondGenerator3d(nn.Module):
     def __init__(self, nz, ngf, output_shape, cond_dim, cond_embed_dim=32):
         super().__init__()
@@ -126,7 +141,7 @@ class CondGenerator3d(nn.Module):
 
 
 class CondDiscriminator3d(nn.Module):
-    def __init__(self, ndf, input_shape, cond_dim, cond_embed_dim=32, nc=3):
+    def __init__(self, ndf, input_shape, cond_dim, cond_embed_dim=32, nc=2):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv3d(1, ndf, 4, 2, 1, bias=False),
@@ -217,142 +232,45 @@ def plot_voxel_grid_3d(voxel_grid, title='', save_path=None):
     plt.close(fig)
 
 
-# def GAN_step_MDD_3d_cond(D, G, A, D_opt, G_opt, A_opt,
-#                          P_batch, N_batch, c_batch, noise_batch,
-#                          batch_size, device,
-#                          validity_weight=None, diversity_weight=0.0,
-#                          smooth_real=0.1, smooth_fake=0.0,
-#                          d_update=True, use_label_smoothing=True,
-#                          use_diversity_loss=False):
-#     if d_update:
-#         D.zero_grad()
-#         out_real_pos = D(P_batch, c_batch)
-#         log_probs_real_pos = torch.log_softmax(out_real_pos, dim=1)
-#         p_real_pos = torch.zeros_like(out_real_pos)
-#         p_real_pos[:, 1] = 1.0 - smooth_real if use_label_smoothing else 1.0
-#         L_D_real = -(p_real_pos * log_probs_real_pos).sum(dim=1).mean()
-
-#         out_real_neg = D(N_batch, c_batch)
-#         log_probs_real_neg = torch.log_softmax(out_real_neg, dim=1)
-#         p_real_neg = torch.zeros_like(out_real_neg)
-#         p_real_neg[:, 0] = 1.0
-#         L_D_neg = -(p_real_neg * log_probs_real_neg).sum(dim=1).mean()
-
-#         fake_data_for_D = G(noise_batch, c_batch)
-#         out_fake = D(fake_data_for_D.detach(), c_batch)
-#         log_probs_fake = torch.log_softmax(out_fake, dim=1)
-#         p_fake = torch.zeros_like(out_fake)
-#         p_fake[:, 0] = 1.0
-#         L_D_fake = -(p_fake * log_probs_fake).sum(dim=1).mean()
-
-#         L_D_tot = L_D_real + L_D_neg + L_D_fake
-#         L_D_tot.backward()
-#         D_grad_norm = 0.0
-#         for p in D.parameters():
-#             if p.grad is not None:
-#                 D_grad_norm += p.grad.detach().pow(2).sum().item()
-#         D_grad_norm = D_grad_norm ** 0.5
-#         D_opt.step()
-#     else:
-#         L_D_real = torch.tensor(0.0, device=device)
-#         L_D_neg = torch.tensor(0.0, device=device)
-#         L_D_fake = torch.tensor(0.0, device=device)
-#         D_grad_norm = 0.0
-
-#     G.zero_grad()
-#     fake_data = G(noise_batch, c_batch)
-#     out_fake_for_G = D(fake_data, c_batch)
-#     log_probs_fake_for_G = torch.log_softmax(out_fake_for_G, dim=1)
-#     p_real_for_G = torch.zeros_like(out_fake_for_G)
-#     p_real_for_G[:, 1] = 1.0 - smooth_real if use_label_smoothing else 1.0
-#     L_G = -(p_real_for_G * log_probs_fake_for_G).sum(dim=1).mean()
-
-#     if use_diversity_loss and diversity_weight > 0:
-#         feat = fake_data.view(fake_data.size(0), -1)
-#         L_div = diversity_loss(feat)
-#         L_G_tot = L_G + diversity_weight * L_div
-#     else:
-#         L_div = None
-#         L_G_tot = L_G
-
-#     L_G_tot.backward()
-#     G_grad_norm = 0.0
-#     for p in G.parameters():
-#         if p.grad is not None:
-#             G_grad_norm += p.grad.detach().pow(2).sum().item()
-#     G_grad_norm = G_grad_norm ** 0.5
-#     G_opt.step()
-
-#     report = {
-#         'L_D_real': float(L_D_real.item()),
-#         'L_D_neg': float(L_D_neg.item()),
-#         'L_D_fake': float(L_D_fake.item()),
-#         'L_G': float(L_G.item()),
-#         'D_grad_norm': float(D_grad_norm),
-#         'G_grad_norm': float(G_grad_norm),
-#     }
-#     if L_div is not None:
-#         report['L_div'] = float(L_div.item())
-#     return report
-
-
-def GAN_step_MDD_3d_cond_3class(
-    D, G, A, D_opt, G_opt, A_opt,
-    P_batch, N_batch, c_batch, noise_batch,
-    batch_size, device,
-    validity_weight=None, diversity_weight=0.0,
-    smooth_real=0.1, smooth_fake=0.0,   # smooth_fake kept but unused by default
-    d_update=True, use_label_smoothing=True,
-    use_diversity_loss=False,
-):
-    criterion = nn.CrossEntropyLoss()
-
-    # -------------------------
-    # Discriminator update (3-class: 0=fake, 1=pos, 2=neg)
-    # -------------------------
+def GAN_step_DO_3d_cond(D, G, A, D_opt, G_opt, A_opt,
+                         P_batch, N_batch, cP_batch, cN_batch, noise_batch,
+                         batch_size, device,
+                         diversity_weight=0.0,
+                         smooth_real=0.1, smooth_fake=0.0,
+                         d_update=True, use_label_smoothing=True,
+                         use_diversity_loss=False):
     if d_update:
         D.zero_grad()
 
-        # Labels
-        #   y_pos = 1  (positive real)
-        #   y_neg = 2  (negative real)
-        #   y_fake = 0 (fake)
-        y_pos = torch.full((batch_size,), 1, dtype=torch.long, device=device)
-        y_neg = torch.full((batch_size,), 2, dtype=torch.long, device=device)
-        y_fake = torch.full((batch_size,), 0, dtype=torch.long, device=device)
+        # Real positives with their own conditions
+        out_real_pos = D(P_batch, cP_batch)
+        log_probs_real_pos = torch.log_softmax(out_real_pos, dim=1)
+        p_real_pos = torch.zeros_like(out_real_pos)
+        p_real_pos[:, 1] = 1.0 - smooth_real if use_label_smoothing else 1.0
+        L_D_real = -(p_real_pos * log_probs_real_pos).sum(dim=1).mean()
 
-        # Real positives
-        out_real_pos = D(P_batch, c_batch)  # [B, 3]
-        if use_label_smoothing and smooth_real > 0.0:
-            # Manual smoothed CE for positive class
-            log_probs = torch.log_softmax(out_real_pos, dim=1)
-            p_target = torch.zeros_like(out_real_pos)
-            p_target[:, 1] = 1.0 - smooth_real
-            L_D_real = -(p_target * log_probs).sum(dim=1).mean()
-        else:
-            L_D_real = criterion(out_real_pos, y_pos)
+        # Real negatives with their own conditions
+        out_real_neg = D(N_batch, cN_batch)
+        log_probs_real_neg = torch.log_softmax(out_real_neg, dim=1)
+        p_real_neg = torch.zeros_like(out_real_neg)
+        p_real_neg[:, 0] = 1.0
+        L_D_neg = -(p_real_neg * log_probs_real_neg).sum(dim=1).mean()
 
-        # Real negatives
-        out_real_neg = D(N_batch, c_batch)  # [B, 3]
-        # Usually we do NOT smooth negatives; use hard label 2
-        L_D_neg = criterion(out_real_neg, y_neg)
+        # Fakes: generator targets positive conditions
+        fake_data_for_D = G(noise_batch, cP_batch)
+        out_fake = D(fake_data_for_D.detach(), cP_batch)
+        log_probs_fake = torch.log_softmax(out_fake, dim=1)
+        p_fake = torch.zeros_like(out_fake)
+        p_fake[:, 0] = 1.0
+        L_D_fake = -(p_fake * log_probs_fake).sum(dim=1).mean()
 
-        # Fake
-        fake_data_for_D = G(noise_batch, c_batch)
-        out_fake = D(fake_data_for_D.detach(), c_batch)  # [B, 3]
-        L_D_fake = criterion(out_fake, y_fake)
-
-        # Total D loss
         L_D_tot = L_D_real + L_D_neg + L_D_fake
         L_D_tot.backward()
-
-        # Grad norm (for logging)
         D_grad_norm = 0.0
         for p in D.parameters():
             if p.grad is not None:
                 D_grad_norm += p.grad.detach().pow(2).sum().item()
         D_grad_norm = D_grad_norm ** 0.5
-
         D_opt.step()
     else:
         L_D_real = torch.tensor(0.0, device=device)
@@ -360,24 +278,14 @@ def GAN_step_MDD_3d_cond_3class(
         L_D_fake = torch.tensor(0.0, device=device)
         D_grad_norm = 0.0
 
-    # -------------------------
-    # Generator update
-    # -------------------------
     G.zero_grad()
-    fake_data = G(noise_batch, c_batch)
-    out_fake_for_G = D(fake_data, c_batch)  # [B, 3]
+    fake_data = G(noise_batch, cP_batch)
+    out_fake_for_G = D(fake_data, cP_batch)
+    log_probs_fake_for_G = torch.log_softmax(out_fake_for_G, dim=1)
+    p_real_for_G = torch.zeros_like(out_fake_for_G)
+    p_real_for_G[:, 1] = 1.0 - smooth_real if use_label_smoothing else 1.0
+    L_G = -(p_real_for_G * log_probs_fake_for_G).sum(dim=1).mean()
 
-    # Generator tries to get class 1 (positive)
-    if use_label_smoothing and smooth_real > 0.0:
-        log_probs_fake_for_G = torch.log_softmax(out_fake_for_G, dim=1)
-        p_real_for_G = torch.zeros_like(out_fake_for_G)
-        p_real_for_G[:, 1] = 1.0 - smooth_real
-        L_G = -(p_real_for_G * log_probs_fake_for_G).sum(dim=1).mean()
-    else:
-        y_pos = torch.full((batch_size,), 1, dtype=torch.long, device=device)
-        L_G = criterion(out_fake_for_G, y_pos)
-
-    # Optional diversity regularization
     if use_diversity_loss and diversity_weight > 0:
         feat = fake_data.view(fake_data.size(0), -1)
         L_div = diversity_loss(feat)
@@ -407,12 +315,11 @@ def GAN_step_MDD_3d_cond_3class(
     return report
 
 
-
 def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                   P_loader, N_loader,
                   num_steps, batch_size, noise_dim,
                   train_step_fn, device,
-                  validity_weight, diversity_weight=0.0,
+                  diversity_weight=0.0,
                   checkpoint_dir=None, ckpt_interval=None,
                   smooth_real=0.1, smooth_fake=0.0,
                   C_P_full=None, cond_strs=None,
@@ -438,17 +345,18 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
     for step in steps_range:
         P_batch, cP = P_loader.get_batch()
         N_batch, cN = N_loader.get_batch()
-        c_batch = cP.to(device)
+
         P_batch = P_batch.to(device)
         N_batch = N_batch.to(device)
+        cP = cP.to(device)
+        cN = cN.to(device)
         noise_batch = torch.randn(batch_size, noise_dim, device=device)
         d_update = ((step + 1) % d_every == 0)
 
         report = train_step_fn(
             D, G, A, D_opt, G_opt, A_opt,
-            P_batch, N_batch, c_batch, noise_batch,
+            P_batch, N_batch, cP, cN, noise_batch,
             batch_size, device,
-            validity_weight=validity_weight,
             diversity_weight=diversity_weight,
             smooth_real=smooth_real,
             smooth_fake=smooth_fake,
@@ -515,8 +423,8 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
 
 if __name__ == '__main__':
     data_root = '/xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/octant'
-    data_path = os.path.join(data_root, '10000_labeled_voxels_32x32x32_octmass_score0.7.npy')
-    meta_path = os.path.join(data_root, '10000_labeled_voxels_32x32x32_octmass_score0.7_meta.npz')
+    data_path = os.path.join(data_root, '5000_labeled_voxels_32x32x32_octmass_score0.7.npy')
+    meta_path = os.path.join(data_root, '5000_labeled_voxels_32x32x32_octmass_score0.7_meta.npz')
 
     meta = np.load(meta_path)
     cutoff_train = float(meta['cutoff_train'])
@@ -526,7 +434,7 @@ if __name__ == '__main__':
     c_min = float(meta['c_min'])
     c_max = float(meta['c_max'])
 
-    batch_size = 32
+    batch_size = 16
     nz = 300
     ngf = 256
     ndf = 64
@@ -538,7 +446,7 @@ if __name__ == '__main__':
     d_every = 3
     use_label_smoothing = True
     use_diversity_loss = False
-    diversity_weight = 0.05
+    diversity_weight = 0.00
     n_vis_samples = 10
 
     dataset = CondVoxelDataset(data_path)
@@ -558,7 +466,7 @@ if __name__ == '__main__':
     cond_dim = C_P.shape[1]
 
     netG = CondGenerator3d(nz, ngf, shape3d, cond_dim)
-    netD = CondDiscriminator3d(ndf, shape3d, cond_dim, nc=3)
+    netD = CondDiscriminator3d(ndf, shape3d, cond_dim, nc=2)
 
     if device.type == 'cuda' and torch.cuda.device_count() > 1:
         print(f'Using DataParallel on {torch.cuda.device_count()} GPUs')
@@ -613,37 +521,12 @@ if __name__ == '__main__':
     eval_every_epochs = 10
     eval_every_steps = eval_every_epochs * steps_per_epoch
 
-    # netD, netG, _ = train_3d_cond(
-    #     netD, netG, None,
-    #     D_opt, G_opt, None,
-    #     P_loader, N_loader,
-    #     num_steps, batch_size, nz,
-    #     GAN_step_MDD_3d_cond, device,
-    #     validity_weight=1,
-    #     diversity_weight=diversity_weight,
-    #     checkpoint_dir=checkpoint_dir,
-    #     ckpt_interval=ckpt_interval,
-    #     smooth_real=smooth_real,
-    #     smooth_fake=smooth_fake,
-    #     C_P_full=C_P,
-    #     cond_strs=dataset.cond_strs,
-    #     eval_every_steps=eval_every_steps,
-    #     nz=nz,
-    #     start_step=start_step,
-    #     d_every=d_every,
-    #     use_label_smoothing=use_label_smoothing,
-    #     use_diversity_loss=use_diversity_loss,
-    #     n_vis_samples=n_vis_samples,
-    # )
-
     netD, netG, _ = train_3d_cond(
         netD, netG, None,
         D_opt, G_opt, None,
         P_loader, N_loader,
         num_steps, batch_size, nz,
-        GAN_step_MDD_3d_cond_3class,  # <--- new step fn
-        device,
-        validity_weight=1,
+        GAN_step_DO_3d_cond, device,
         diversity_weight=diversity_weight,
         checkpoint_dir=checkpoint_dir,
         ckpt_interval=ckpt_interval,
@@ -657,7 +540,8 @@ if __name__ == '__main__':
         d_every=d_every,
         use_label_smoothing=use_label_smoothing,
         use_diversity_loss=use_diversity_loss,
-        n_vis_samples=n_vis_samples)
+        n_vis_samples=n_vis_samples,
+    )
 
     netG.eval()
     with torch.no_grad():
@@ -685,6 +569,7 @@ if __name__ == '__main__':
     all_scores = []
     all_mass = []
     all_comp = []
+    all_div = []
     netG.eval()
     with torch.no_grad():
         for _ in trange(batches_eval):
@@ -699,17 +584,22 @@ if __name__ == '__main__':
             all_mass.append(mass_fracs)
             all_comp.append(comp_vals)
 
+            div_val = eval_dpp_div_from_voxels(batch_np, device=device)
+            all_div.append(div_val)
+
     all_scores = np.concatenate(all_scores)
     all_mass = np.concatenate(all_mass)
     all_comp = np.concatenate(all_comp)
     positive_rate = float((all_scores < cutoff_train).mean() * 100.0)
     mean_mass = float(all_mass.mean())
     mean_comp = float(all_comp.mean())
+    mean_diversity = float(np.mean(all_div))
     print('Training quantile (score_cutoff):', score_cutoff)
     print('Training raw cutoff value (cutoff_train):', cutoff_train)
     print('Mass+compactness positive rate wrt TRAIN cutoff (%):', positive_rate)
     print('Mean mass fraction:', mean_mass)
     print('Mean compactness:', mean_comp)
+    print('Mean DPP diversity:', mean_diversity)
 
     results_txt = os.path.join(checkpoint_dir, 'evaluation_mass_compactness.txt')
     with open(results_txt, 'w') as f:
@@ -718,3 +608,4 @@ if __name__ == '__main__':
         f.write(f'Mass+compactness positive rate wrt train cutoff (%): {positive_rate:.4f}\n')
         f.write(f'Mean mass fraction: {mean_mass:.6f}\n')
         f.write(f'Mean compactness: {mean_comp:.6f}\n')
+        f.write(f'Mean DPP diversity: {mean_diversity:.6f}\n')

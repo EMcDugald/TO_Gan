@@ -44,7 +44,7 @@ if __name__ == "__main__":
     print("Unique shapes detected:", unique_shapes)
 
     target_shape = (32, 32, 32)
-    n_voxels_to_make = 15000
+    n_voxels_to_make = 5000
 
     output_dir = "/xdisk/hdb/emcdugald/simple_gan/train_data/323232"
     os.makedirs(output_dir, exist_ok=True)
