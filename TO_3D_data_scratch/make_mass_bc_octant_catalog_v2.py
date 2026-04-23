@@ -8,7 +8,7 @@ TARGET_SHAPE = (32, 32, 32)
 
 N_MASS_BINS = 5
 MAX_TOTAL_PLOTS = 500
-N_REP_PER_BIN = 5
+N_REP_PER_BIN = 3
 
 os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
@@ -33,7 +33,8 @@ def plot_voxel(binary_arr, save_path, title="", bc_arr=None,
     # -----------------------------------
     if show_octants:
         mx, my, mz = nx / 2.0, ny / 2.0, nz / 2.0
-        line_kw = dict(color="limegreen", linestyle="--", linewidth=1.2, alpha=0.55)
+        #line_kw = dict(color="limegreen", linestyle="--", linewidth=1.2, alpha=0.55)
+        line_kw = dict(color="lime", linestyle="--", linewidth=2.2, alpha=0.95)
 
         # Plane x = mx
         ax.plot([mx, mx], [0, ny], [0, 0], **line_kw)
