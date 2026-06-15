@@ -1,21 +1,15 @@
-import torch
-print("PyTorch version:", torch.__version__)
-print("CUDA available:", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("GPU device count (initial):", torch.cuda.device_count())
-    print("GPU device name[0]:", torch.cuda.get_device_name(0))
-else:
-    print("CUDA not available")
-
-import torch.nn as nn
-import torch.optim as optim
-import numpy as np
 import os
-import matplotlib.pyplot as plt
-from tqdm import trange
-from torch.utils.data import Dataset
 import csv
 from datetime import datetime
+
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm import trange
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset
 
 
 class DataNotFoundError(Exception):
@@ -31,16 +25,20 @@ class CondVoxelDataset(Dataset):
         conds = [x[1] for x in data]
         labels = [x[2] for x in data]
         cond_strs = [x[3] for x in data]
+
         X = torch.tensor(np.stack(voxels), dtype=torch.float32)
         C = torch.tensor(np.stack(conds), dtype=torch.float32)
         y = torch.tensor(labels, dtype=torch.long)
-        self.cond_strs = cond_strs
+
         if X.ndim == 4:
             X = X.unsqueeze(1)
-        X = X * 2 - 1
+        X = X * 2.0 - 1.0
+
         self.X = X
         self.C = C
         self.y = y
+        self.cond_strs = cond_strs
+
         print("Total samples:", X.shape[0])
         print("Condition dim:", C.shape[1])
         print("Positives:", int((y == 1).sum().item()), "Negatives:", int((y == 0).sum().item()))
@@ -101,67 +99,8 @@ def diversity_loss(x):
 
 
 def eval_dpp_div_from_voxels(batch_np, device):
-    """
-    batch_np: numpy array [B, D, H, W], binarized (0/1 or bool).
-    Returns a scalar DPP diversity score (higher = more diverse).
-    """
-    # Flatten each voxel grid to a vector
-    x = torch.tensor(
-        batch_np.reshape(batch_np.shape[0], -1),
-        dtype=torch.float32,
-        device=device,
-    )
+    x = torch.tensor(batch_np.reshape(batch_np.shape[0], -1), dtype=torch.float32, device=device)
     return float(diversity_loss(x).item())
-
-
-
-class CondGenerator3d(nn.Module):
-    def __init__(self, nz, ngf, output_shape, cond_dim, cond_embed_dim=32):
-        super().__init__()
-        D, H, W = output_shape
-        self.cond_fc = nn.Linear(cond_dim, cond_embed_dim)
-        self.init_shape = (ngf * 8, D // 16, H // 16, W // 16)
-        self.fc = nn.Linear(nz + cond_embed_dim, int(np.prod(self.init_shape)))
-        self.main = nn.Sequential(
-            nn.BatchNorm3d(ngf * 8), nn.ReLU(True),
-            nn.ConvTranspose3d(ngf * 8, ngf * 4, 4, 2, 1, bias=False),
-            nn.BatchNorm3d(ngf * 4), nn.ReLU(True),
-            nn.ConvTranspose3d(ngf * 4, ngf * 2, 4, 2, 1, bias=False),
-            nn.BatchNorm3d(ngf * 2), nn.ReLU(True),
-            nn.ConvTranspose3d(ngf * 2, ngf, 4, 2, 1, bias=False),
-            nn.BatchNorm3d(ngf), nn.ReLU(True),
-            nn.ConvTranspose3d(ngf, 1, 4, 2, 1, bias=False),
-            nn.Tanh(),
-        )
-
-    def forward(self, z, c):
-        c_emb = torch.relu(self.cond_fc(c))
-        x = self.fc(torch.cat([z, c_emb], dim=1))
-        return self.main(x.view(x.size(0), *self.init_shape))
-
-
-class CondDiscriminator3d(nn.Module):
-    def __init__(self, ndf, input_shape, cond_dim, cond_embed_dim=32, nc=3):
-        super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv3d(1, ndf, 4, 2, 1, bias=False),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv3d(ndf, ndf * 2, 4, 2, 1, bias=False),
-            nn.BatchNorm3d(ndf * 2), nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv3d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
-            nn.BatchNorm3d(ndf * 4), nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv3d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
-            nn.BatchNorm3d(ndf * 8), nn.LeakyReLU(0.2, inplace=True),
-        )
-        D, H, W = input_shape
-        feat_size = (ndf * 8) * (D // 16) * (H // 16) * (W // 16)
-        self.cond_fc = nn.Linear(cond_dim, cond_embed_dim)
-        self.fc = nn.Linear(feat_size + cond_embed_dim, nc)
-
-    def forward(self, x, c):
-        h = self.conv(x).view(x.size(0), -1)
-        c_emb = torch.relu(self.cond_fc(c))
-        return self.fc(torch.cat([h, c_emb], dim=1))
 
 
 class ReusableDataLoader:
@@ -187,6 +126,169 @@ class ReusableDataLoader:
         x_batch = torch.stack([self.X[i] for i in batch_indices])
         c_batch = torch.stack([self.C[i] for i in batch_indices])
         return x_batch, c_batch
+
+
+class CondBroadcast3D(nn.Module):
+    def __init__(self, cond_dim, out_channels):
+        super().__init__()
+        self.proj = nn.Linear(cond_dim, out_channels)
+
+    def forward(self, c, spatial_shape):
+        B = c.shape[0]
+        D, H, W = spatial_shape
+        x = self.proj(c).view(B, -1, 1, 1, 1)
+        return x.expand(B, x.shape[1], D, H, W)
+
+
+class FiLM3D(nn.Module):
+    def __init__(self, cond_dim, channels):
+        super().__init__()
+        self.to_gamma_beta = nn.Sequential(
+            nn.Linear(cond_dim, channels * 2),
+            nn.SiLU(),
+            nn.Linear(channels * 2, channels * 2),
+        )
+
+    def forward(self, x, c):
+        gamma_beta = self.to_gamma_beta(c)
+        gamma, beta = torch.chunk(gamma_beta, 2, dim=1)
+        gamma = gamma.view(x.size(0), x.size(1), 1, 1, 1)
+        beta = beta.view(x.size(0), x.size(1), 1, 1, 1)
+        return x * (1.0 + gamma) + beta
+
+
+class ConvBlock3D(nn.Module):
+    def __init__(self, in_ch, out_ch, cond_dim, groups=8):
+        super().__init__()
+        g1 = min(groups, out_ch)
+        while out_ch % g1 != 0 and g1 > 1:
+            g1 -= 1
+        self.conv1 = nn.Conv3d(in_ch, out_ch, 3, padding=1, bias=False)
+        self.norm1 = nn.GroupNorm(g1, out_ch)
+        self.film1 = FiLM3D(cond_dim, out_ch)
+        self.conv2 = nn.Conv3d(out_ch, out_ch, 3, padding=1, bias=False)
+        self.norm2 = nn.GroupNorm(g1, out_ch)
+        self.film2 = FiLM3D(cond_dim, out_ch)
+        self.act = nn.SiLU(inplace=True)
+        self.skip = nn.Conv3d(in_ch, out_ch, 1, bias=False) if in_ch != out_ch else nn.Identity()
+
+    def forward(self, x, c):
+        s = self.skip(x)
+        x = self.conv1(x)
+        x = self.norm1(x)
+        x = self.film1(x, c)
+        x = self.act(x)
+        x = self.conv2(x)
+        x = self.norm2(x)
+        x = self.film2(x, c)
+        x = self.act(x + s)
+        return x
+
+
+class DownBlock3D(nn.Module):
+    def __init__(self, in_ch, out_ch, cond_dim):
+        super().__init__()
+        self.block = ConvBlock3D(in_ch, out_ch, cond_dim)
+        self.down = nn.Conv3d(out_ch, out_ch, 4, 2, 1, bias=False)
+
+    def forward(self, x, c):
+        x = self.block(x, c)
+        skip = x
+        x = self.down(x)
+        return x, skip
+
+
+class UpBlock3D(nn.Module):
+    def __init__(self, in_ch, skip_ch, out_ch, cond_dim):
+        super().__init__()
+        self.up = nn.ConvTranspose3d(in_ch, out_ch, 4, 2, 1, bias=False)
+        self.block = ConvBlock3D(out_ch + skip_ch, out_ch, cond_dim)
+
+    def forward(self, x, skip, c):
+        x = self.up(x)
+        if x.shape[-3:] != skip.shape[-3:]:
+            ds, hs, ws = skip.shape[-3:]
+            x = x[:, :, :ds, :hs, :ws]
+        x = torch.cat([x, skip], dim=1)
+        x = self.block(x, c)
+        return x
+
+
+class CondUNetGenerator3D(nn.Module):
+    def __init__(self, nz, base_ch, output_shape, cond_dim, cond_channels=8):
+        super().__init__()
+        D, H, W = output_shape
+        assert D % 8 == 0 and H % 8 == 0 and W % 8 == 0, "UNet expects dims divisible by 8"
+        self.output_shape = output_shape
+        self.nz = nz
+        self.cond_broadcast = CondBroadcast3D(cond_dim, cond_channels)
+        self.noise_to_seed = nn.Linear(nz, D * H * W)
+
+        in_ch = 1 + cond_channels
+        self.enc1 = DownBlock3D(in_ch, base_ch, cond_dim)
+        self.enc2 = DownBlock3D(base_ch, base_ch * 2, cond_dim)
+        self.enc3 = DownBlock3D(base_ch * 2, base_ch * 4, cond_dim)
+        self.bottleneck = ConvBlock3D(base_ch * 4, base_ch * 8, cond_dim)
+        self.dec3 = UpBlock3D(base_ch * 8, base_ch * 4, base_ch * 4, cond_dim)
+        self.dec2 = UpBlock3D(base_ch * 4, base_ch * 2, base_ch * 2, cond_dim)
+        self.dec1 = UpBlock3D(base_ch * 2, base_ch, base_ch, cond_dim)
+        self.out_conv = nn.Sequential(
+            nn.Conv3d(base_ch, base_ch, 3, padding=1, bias=False),
+            nn.GroupNorm(min(8, base_ch), base_ch),
+            nn.SiLU(inplace=True),
+            nn.Conv3d(base_ch, 1, 1),
+            nn.Tanh(),
+        )
+
+    def forward(self, z, c):
+        B = z.size(0)
+        D, H, W = self.output_shape
+        seed = self.noise_to_seed(z).view(B, 1, D, H, W)
+        cond_map = self.cond_broadcast(c, self.output_shape)
+        x = torch.cat([seed, cond_map], dim=1)
+
+        x, s1 = self.enc1(x, c)
+        x, s2 = self.enc2(x, c)
+        x, s3 = self.enc3(x, c)
+        x = self.bottleneck(x, c)
+        x = self.dec3(x, s3, c)
+        x = self.dec2(x, s2, c)
+        x = self.dec1(x, s1, c)
+        x = self.out_conv(x)
+        return x
+
+
+class CondDiscriminator3DImproved(nn.Module):
+    def __init__(self, ndf, input_shape, cond_dim, cond_channels=8, nc=3):
+        super().__init__()
+        D, H, W = input_shape
+        assert D % 16 == 0 and H % 16 == 0 and W % 16 == 0, "Discriminator expects dims divisible by 16"
+        self.cond_broadcast = CondBroadcast3D(cond_dim, cond_channels)
+        in_ch = 1 + cond_channels
+        self.conv = nn.Sequential(
+            nn.Conv3d(in_ch, ndf, 4, 2, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv3d(ndf, ndf * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm3d(ndf * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv3d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm3d(ndf * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv3d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm3d(ndf * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+        feat_size = (ndf * 8) * (D // 16) * (H // 16) * (W // 16)
+        self.cond_proj = nn.Linear(cond_dim, feat_size)
+        self.fc = nn.Linear(feat_size, nc)
+
+    def forward(self, x, c):
+        cond_map = self.cond_broadcast(c, x.shape[-3:])
+        x = torch.cat([x, cond_map], dim=1)
+        h = self.conv(x).view(x.size(0), -1)
+        proj = self.cond_proj(c)
+        h = h + proj
+        return self.fc(h)
 
 
 def unwrap_module(m):
@@ -232,7 +334,6 @@ def plot_voxel_grid_3d(voxel_grid, title='', save_path=None):
     plt.close(fig)
 
 
-
 def GAN_step_MDD_3d_cond_3class(
     D, G, A, D_opt, G_opt, A_opt,
     P_batch, N_batch, c_batch, noise_batch,
@@ -244,52 +345,41 @@ def GAN_step_MDD_3d_cond_3class(
 ):
     criterion = nn.CrossEntropyLoss()
 
-    # -------------------------
-    # Discriminator update (3-class: 0=fake, 1=pos, 2=neg)
-    # -------------------------
     if d_update:
-        D.zero_grad()
-
-        # Labels
-        #   y_pos = 1  (positive real)
-        #   y_neg = 2  (negative real)
-        #   y_fake = 0 (fake)
+        D.zero_grad(set_to_none=True)
         y_pos = torch.full((batch_size,), 1, dtype=torch.long, device=device)
         y_neg = torch.full((batch_size,), 2, dtype=torch.long, device=device)
         y_fake = torch.full((batch_size,), 0, dtype=torch.long, device=device)
 
-        # Real positives
-        out_real_pos = D(P_batch, c_batch)  # [B, 3]
+        out_real_pos = D(P_batch, c_batch)
         if use_label_smoothing and smooth_real > 0.0:
-            # Manual smoothed CE for positive class
+            # Label smoothing for real positives:
+            # - mostly class 1 (positive)
+            # - small mass shared between class 0 (fake) and class 2 (negative)
             log_probs = torch.log_softmax(out_real_pos, dim=1)
             p_target = torch.zeros_like(out_real_pos)
             p_target[:, 1] = 1.0 - smooth_real
+            p_target[:, 0] = smooth_real / 2.0
+            p_target[:, 2] = smooth_real / 2.0
             L_D_real = -(p_target * log_probs).sum(dim=1).mean()
         else:
             L_D_real = criterion(out_real_pos, y_pos)
 
-        # Real negatives
-        out_real_neg = D(N_batch, c_batch)  # [B, 3]
-        # Usually we do NOT smooth negatives; use hard label 2
+        out_real_neg = D(N_batch, c_batch)
         L_D_neg = criterion(out_real_neg, y_neg)
 
-        # Fake
         fake_data_for_D = G(noise_batch, c_batch)
-        out_fake = D(fake_data_for_D.detach(), c_batch)  # [B, 3]
+        out_fake = D(fake_data_for_D.detach(), c_batch)
         L_D_fake = criterion(out_fake, y_fake)
 
-        # Total D loss
         L_D_tot = L_D_real + L_D_neg + L_D_fake
         L_D_tot.backward()
 
-        # Grad norm (for logging)
         D_grad_norm = 0.0
         for p in D.parameters():
             if p.grad is not None:
                 D_grad_norm += p.grad.detach().pow(2).sum().item()
         D_grad_norm = D_grad_norm ** 0.5
-
         D_opt.step()
     else:
         L_D_real = torch.tensor(0.0, device=device)
@@ -297,24 +387,13 @@ def GAN_step_MDD_3d_cond_3class(
         L_D_fake = torch.tensor(0.0, device=device)
         D_grad_norm = 0.0
 
-    # -------------------------
-    # Generator update
-    # -------------------------
-    G.zero_grad()
+    G.zero_grad(set_to_none=True)
     fake_data = G(noise_batch, c_batch)
-    out_fake_for_G = D(fake_data, c_batch)  # [B, 3]
+    out_fake_for_G = D(fake_data, c_batch)
 
-    # Generator tries to get class 1 (positive)
-    if use_label_smoothing and smooth_real > 0.0:
-        log_probs_fake_for_G = torch.log_softmax(out_fake_for_G, dim=1)
-        p_real_for_G = torch.zeros_like(out_fake_for_G)
-        p_real_for_G[:, 1] = 1.0 - smooth_real
-        L_G = -(p_real_for_G * log_probs_fake_for_G).sum(dim=1).mean()
-    else:
-        y_pos = torch.full((batch_size,), 1, dtype=torch.long, device=device)
-        L_G = criterion(out_fake_for_G, y_pos)
+    y_pos = torch.full((batch_size,), 1, dtype=torch.long, device=device)
+    L_G = criterion(out_fake_for_G, y_pos)
 
-    # Optional diversity regularization
     if use_diversity_loss and diversity_weight > 0:
         feat = fake_data.view(fake_data.size(0), -1)
         L_div = diversity_loss(feat)
@@ -344,7 +423,6 @@ def GAN_step_MDD_3d_cond_3class(
     return report
 
 
-
 def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                   P_loader, N_loader,
                   num_steps, batch_size, noise_dim,
@@ -359,7 +437,7 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                   use_diversity_loss=False,
                   n_vis_samples=10):
     best_G_loss = float('inf')
-    steps_per_epoch = len(P_loader.X) // batch_size
+    steps_per_epoch = max(1, len(P_loader.X) // batch_size)
     metrics_file = None
     metrics_writer = None
     if checkpoint_dir is not None:
@@ -390,7 +468,7 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
             d_update=d_update,
             use_label_smoothing=use_label_smoothing,
             use_diversity_loss=use_diversity_loss,
-            )
+        )
 
         steps_range.set_postfix({k: f"{v:.4f}" for k, v in report.items() if isinstance(v, float)})
 
@@ -449,6 +527,14 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
 
 
 if __name__ == '__main__':
+    print('PyTorch version:', torch.__version__)
+    print('CUDA available:', torch.cuda.is_available())
+    if torch.cuda.is_available():
+        print('GPU device count (initial):', torch.cuda.device_count())
+        print('GPU device name[0]:', torch.cuda.get_device_name(0))
+    else:
+        print('CUDA not available')
+
     data_root = '/xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/octant'
     data_path = os.path.join(data_root, '10000_labeled_voxels_32x32x32_octmass_score0.7.npy')
     meta_path = os.path.join(data_root, '10000_labeled_voxels_32x32x32_octmass_score0.7_meta.npz')
@@ -461,21 +547,13 @@ if __name__ == '__main__':
     c_min = float(meta['c_min'])
     c_max = float(meta['c_max'])
 
-    # batch_size = 16
-    # nz = 300
-    # ngf = 256
-    # ndf = 64
-
-    batch_size = 64
+    batch_size = 32
     nz = 128
-    ngf = 128
+    ngf = 64
     ndf = 32
-
     num_epochs = 1000
-    # lr_D = 2e-4
-    # lr_G = 2e-4
-    lr_D = 1e-4
-    lr_G = 1e-4
+    lr_D = 2e-4
+    lr_G = 2e-4
     smooth_real = 0.1
     smooth_fake = 0.0
     d_every = 3
@@ -500,8 +578,8 @@ if __name__ == '__main__':
     shape3d = P.shape[2:]
     cond_dim = C_P.shape[1]
 
-    netG = CondGenerator3d(nz, ngf, shape3d, cond_dim)
-    netD = CondDiscriminator3d(ndf, shape3d, cond_dim, nc=3)
+    netG = CondUNetGenerator3D(nz, ngf, shape3d, cond_dim, cond_channels=8)
+    netD = CondDiscriminator3DImproved(ndf, shape3d, cond_dim, cond_channels=8, nc=3)
 
     def count_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -527,7 +605,7 @@ if __name__ == '__main__':
     G_opt = optim.Adam(netG.parameters(), lr=lr_G, betas=(0.5, 0.999))
 
     base_ckpt_root = '/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_octant'
-    hp_name = f'octmass_epochs{num_epochs}_bs{batch_size}_nz{nz}_ngf{ngf}_ndf{ndf}_nsamp{n_samples}_lrD{lr_D}_lrG{lr_G}_smoothR{smooth_real}_dEvery{d_every}_div{int(use_diversity_loss)}'
+    hp_name = f'unet_octmass_epochs{num_epochs}_bs{batch_size}_nz{nz}_ngf{ngf}_ndf{ndf}_nsamp{n_samples}_lrD{lr_D}_lrG{lr_G}_smoothR{smooth_real}_dEvery{d_every}_div{int(use_diversity_loss)}'
     timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     checkpoint_dir = os.path.join(base_ckpt_root, f'{hp_name}_{timestamp}')
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -557,20 +635,20 @@ if __name__ == '__main__':
         f_hp.write(f'score_cutoff_value_train = {cutoff_train}\n')
         f_hp.write(f'cond_dim = {cond_dim}\n')
         f_hp.write(f'data_path = {data_path}\n')
+        f_hp.write('conditioning = broadcast + FiLM in G, broadcast + projection in D\n')
 
-    steps_per_epoch = len(P) // batch_size
+    steps_per_epoch = max(1, len(P) // batch_size)
     ckpt_epochs = 5
     ckpt_interval = ckpt_epochs * steps_per_epoch
     eval_every_epochs = 5
     eval_every_steps = eval_every_epochs * steps_per_epoch
-
 
     netD, netG, _ = train_3d_cond(
         netD, netG, None,
         D_opt, G_opt, None,
         P_loader, N_loader,
         num_steps, batch_size, nz,
-        GAN_step_MDD_3d_cond_3class, 
+        GAN_step_MDD_3d_cond_3class,
         device,
         diversity_weight=diversity_weight,
         checkpoint_dir=checkpoint_dir,
@@ -627,7 +705,6 @@ if __name__ == '__main__':
             all_scores.append(score)
             all_mass.append(mass_fracs)
             all_comp.append(comp_vals)
-
             div_val = eval_dpp_div_from_voxels(batch_np, device=device)
             all_div.append(div_val)
 

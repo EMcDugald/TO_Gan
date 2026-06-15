@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=octant_cgan_mdd
+#SBATCH --job-name=cgan_unet
 #SBATCH --account=hdb
 #SBATCH --partition=gpu_standard
 #SBATCH --nodes=1
@@ -8,7 +8,7 @@
 #SBATCH --mem=16G
 #SBATCH --gres=gpu:1
 #SBATCH --time=12:00:00
-#SBATCH --output=octant_cgan_mdd%j.out
+#SBATCH --output=cgan_unet%j.out
 
 module load cuda11
 module load anaconda
@@ -20,4 +20,4 @@ $PYTHON -c "import sys; print('sys.executable:', sys.executable)"
 $PYTHON -c "import torch; print('torch version in job:', torch.__version__)"
 $PYTHON -c "import torch; print('CUDA available:', torch.cuda.is_available(), 'GPUs:', torch.cuda.device_count())"
 
-$PYTHON PoC_3d/train_GAN_MDD_323232_octant_labels.py
+$PYTHON PoC_3d/unet_topo_gan_cond.py

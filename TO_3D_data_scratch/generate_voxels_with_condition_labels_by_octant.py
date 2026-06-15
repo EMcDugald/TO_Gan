@@ -227,7 +227,7 @@ if __name__ == "__main__":
 
     generate_voxels_octant_mass_matched(
         shape_tuple=TARGET_SHAPE,
-        n_samples=10,
+        n_samples=10000,
         topo=topo,
         shapes=shapes,
         bcs=bcs,
