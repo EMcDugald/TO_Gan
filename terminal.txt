@@ -168,3 +168,119 @@ python plot_random_voxels.py \
   --sample_eps 1e-3 \
   --num_workers 2 \
    &> train_diffusion_3d_uncond_bigger.log
+
+
+
+# PLOT METRICS MDD #
+python plot_train_metrics_gan_mdd.py /xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_octant/octmass_epochs1000_bs16_nz300_ngf256_ndf64_nsamp5000_lrD0.0002_lrG0.0002_smoothR0.1_dEvery3_div1_20260616-211717
+
+# PLOT METRICS MDD UNET #
+python plot_train_metrics_gan_mdd_unet.py /xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_octant/unet_octmass_epochs1000_bs32_nz128_ngf64_ndf32_nsamp10000_lrD0.0002_lrG0.0002_smoothR0.1_dEvery3_div1_20260614-175212
+
+# generate train data #
+python generate_train_data.py \
+  --data-root ./data \
+  --outdir /xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/coarse \
+  --conditioning-mode coarse \
+  --n-samples 10000 \
+  --positive-if low_mass
+
+  python generate_train_data.py \
+  --data-root ./data \
+  --outdir /xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/coarse \
+  --conditioning-mode coarse \
+  --n-samples 10000 \
+  --positive-if low_mass \
+  --mass-quantile 0.55
+
+  #visualize data
+
+  python visualize_train_data.py \
+  --data-root ./data \
+  --outdir /home/u26/emcdugald/TO_Gan/TO_3D_data_scratch/fine_catalog \
+  --conditioning-mode fine \
+  --max-plots 100
+
+  python visualize_train_data.py \
+  --data-root ./data \
+  --outdir /home/u26/emcdugald/TO_Gan/TO_3D_data_scratch/coarse_catalog \
+  --conditioning-mode coarse \
+  --n-spatial-bins 10 \
+  --max-plots 100
+
+
+
+  CUDA_VISIBLE_DEVICES=1 python train_GAN_MDD_323232_octant_labels.py
+
+
+
+  ### NEW TRAINER ###
+
+  python train_GAN_MDD_323232.py \
+  --data-path /xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/fine/10000_labeled_voxels_32x32x32_fine_bcLoadOnly_massLabel_low_mass_thr0.494781.npy \
+  --checkpoint-root /xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_fine \
+  --num-epochs 1000 \
+  --batch-size 16 \
+  --use-label-smoothing \
+  --use-diversity-loss \
+  --diversity-weight 0.01 \
+  --eval-every-epochs 20 \
+  --ckpt-every-epochs 20 \
+  --tag fine_run
+
+
+
+  python train_GAN_MDD_323232.py \
+  --data-path /xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/coarse/10000_labeled_voxels_32x32x32_coarse_bcLoadOnly_massLabel_low_mass_thr0.494781_meta.npz \
+  --checkpoint-root /xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_coarse \
+  --num-epochs 1000 \
+  --batch-size 16 \
+  --use-label-smoothing \
+  --use-diversity-loss \
+  --diversity-weight 0.01 \
+  --eval-every-epochs 20 \
+  --ckpt-every-epochs 20 \
+  --tag coarse_run
+
+
+
+  # NEW DATA GENERATORS #
+  python generate_train_data_v2.py \
+  --data-root ./data \
+  --outdir /xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/fine \
+  --shape 32 32 32 \
+  --conditioning-mode fine \
+  --n-samples 7500 \
+  --positive-if low_mass \
+  --mass-quantile 0.55 \
+  --rng-seed 0
+
+  python generate_train_data_v2.py \
+  --data-root ./data \
+  --outdir /xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/coarse \
+  --shape 32 32 32 \
+  --conditioning-mode coarse \
+  --n-samples 7500 \
+  --positive-if low_mass \
+  --mass-quantile 0.55 \
+  --rng-seed 0
+
+
+
+python visualize_train_data_v2.py \
+  --data-root ./data \
+  --outdir /home/u26/emcdugald/TO_Gan/TO_3D_data_scratch/fine_catalog_v2 \
+  --shape 32 32 32 \
+  --conditioning-mode fine \
+  --max-plots 10 \
+  --rng-seed 0
+
+
+python visualize_train_data_v2.py \
+  --data-root ./data \
+  --outdir /home/u26/emcdugald/TO_Gan/TO_3D_data_scratch/coarse_catalog_v2 \
+  --shape 32 32 32 \
+  --conditioning-mode coarse \
+  --n-spatial-bins 10 \
+  --max-plots 10 \
+  --rng-seed 0

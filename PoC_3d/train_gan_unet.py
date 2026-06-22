@@ -1,15 +1,15 @@
-import os
+import argparse
 import csv
+import os
 from datetime import datetime
 
-import numpy as np
 import matplotlib.pyplot as plt
-from tqdm import trange
-
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset
+from tqdm import trange
 
 
 class DataNotFoundError(Exception):
@@ -50,59 +50,6 @@ class CondVoxelDataset(Dataset):
         return self.X[idx], self.C[idx], self.y[idx]
 
 
-def mass_fraction_batch(batch_np):
-    v = (batch_np > 0).astype(np.float64)
-    return v.mean(axis=(1, 2, 3))
-
-
-def compactness_batch(batch_np):
-    B = batch_np.shape[0]
-    v = (batch_np > 0)
-    comp = np.zeros(B, dtype=np.float64)
-    for i in range(B):
-        vi = v[i]
-        total = vi.sum()
-        if total == 0:
-            comp[i] = 0.0
-            continue
-        xs = np.where(vi.any(axis=(1, 2)))[0]
-        ys = np.where(vi.any(axis=(0, 2)))[0]
-        zs = np.where(vi.any(axis=(0, 1)))[0]
-        bbox_vol = (xs[-1] - xs[0] + 1) * (ys[-1] - ys[0] + 1) * (zs[-1] - zs[0] + 1)
-        comp[i] = float(total) / float(bbox_vol)
-    return comp
-
-
-def score_batch_mass_compactness(batch_np, m_min, m_max, c_min, c_max):
-    eps = 1e-8
-    mass_fracs = mass_fraction_batch(batch_np)
-    comp_vals = compactness_batch(batch_np)
-    m_norm = (mass_fracs - m_min) / (m_max - m_min + eps)
-    m_norm = np.clip(m_norm, 0.0, 1.0)
-    c_raw_norm = (comp_vals - c_min) / (c_max - c_min + eps)
-    c_raw_norm = np.clip(c_raw_norm, 0.0, 1.0)
-    c_norm = 1.0 - c_raw_norm
-    score = 0.5 * m_norm + 0.5 * c_norm
-    return score, mass_fracs, comp_vals
-
-
-def diversity_loss(x):
-    r = torch.sum(x ** 2, dim=1, keepdim=True)
-    D = r - 2 * torch.matmul(x, x.T) + r.T
-    S = torch.exp(-0.5 * D ** 2)
-    try:
-        eig_val = torch.linalg.eigvalsh(S)
-    except Exception:
-        eig_val = torch.ones(x.size(0), device=x.device)
-    loss = -torch.mean(torch.log(torch.clamp(eig_val, min=1e-7)))
-    return loss
-
-
-def eval_dpp_div_from_voxels(batch_np, device):
-    x = torch.tensor(batch_np.reshape(batch_np.shape[0], -1), dtype=torch.float32, device=device)
-    return float(diversity_loss(x).item())
-
-
 class ReusableDataLoader:
     def __init__(self, X, C, batch_size, shuffle=True):
         self.X = X
@@ -126,6 +73,28 @@ class ReusableDataLoader:
         x_batch = torch.stack([self.X[i] for i in batch_indices])
         c_batch = torch.stack([self.C[i] for i in batch_indices])
         return x_batch, c_batch
+
+
+def mass_fraction_batch(batch_np):
+    v = (batch_np > 0).astype(np.float64)
+    return v.mean(axis=(1, 2, 3))
+
+
+def diversity_loss(x):
+    r = torch.sum(x ** 2, dim=1, keepdim=True)
+    D = r - 2 * torch.matmul(x, x.T) + r.T
+    S = torch.exp(-0.5 * D ** 2)
+    try:
+        eig_val = torch.linalg.eigvalsh(S)
+    except Exception:
+        eig_val = torch.ones(x.size(0), device=x.device)
+    loss = -torch.mean(torch.log(torch.clamp(eig_val, min=1e-7)))
+    return loss
+
+
+def eval_dpp_div_from_voxels(batch_np, device):
+    x = torch.tensor(batch_np.reshape(batch_np.shape[0], -1), dtype=torch.float32, device=device)
+    return float(diversity_loss(x).item())
 
 
 class CondBroadcast3D(nn.Module):
@@ -352,10 +321,8 @@ def GAN_step_MDD_3d_cond_3class(
         y_fake = torch.full((batch_size,), 0, dtype=torch.long, device=device)
 
         out_real_pos = D(P_batch, c_batch)
+        prob_real_pos = torch.softmax(out_real_pos, dim=1)
         if use_label_smoothing and smooth_real > 0.0:
-            # Label smoothing for real positives:
-            # - mostly class 1 (positive)
-            # - small mass shared between class 0 (fake) and class 2 (negative)
             log_probs = torch.log_softmax(out_real_pos, dim=1)
             p_target = torch.zeros_like(out_real_pos)
             p_target[:, 1] = 1.0 - smooth_real
@@ -366,10 +333,12 @@ def GAN_step_MDD_3d_cond_3class(
             L_D_real = criterion(out_real_pos, y_pos)
 
         out_real_neg = D(N_batch, c_batch)
+        prob_real_neg = torch.softmax(out_real_neg, dim=1)
         L_D_neg = criterion(out_real_neg, y_neg)
 
         fake_data_for_D = G(noise_batch, c_batch)
         out_fake = D(fake_data_for_D.detach(), c_batch)
+        prob_fake_for_D = torch.softmax(out_fake, dim=1)
         L_D_fake = criterion(out_fake, y_fake)
 
         L_D_tot = L_D_real + L_D_neg + L_D_fake
@@ -387,9 +356,20 @@ def GAN_step_MDD_3d_cond_3class(
         L_D_fake = torch.tensor(0.0, device=device)
         D_grad_norm = 0.0
 
+        out_real_pos = D(P_batch, c_batch)
+        prob_real_pos = torch.softmax(out_real_pos, dim=1)
+
+        out_real_neg = D(N_batch, c_batch)
+        prob_real_neg = torch.softmax(out_real_neg, dim=1)
+
+        fake_data_for_D = G(noise_batch, c_batch)
+        out_fake = D(fake_data_for_D.detach(), c_batch)
+        prob_fake_for_D = torch.softmax(out_fake, dim=1)
+
     G.zero_grad(set_to_none=True)
     fake_data = G(noise_batch, c_batch)
     out_fake_for_G = D(fake_data, c_batch)
+    prob_fake_for_G = torch.softmax(out_fake_for_G, dim=1)
 
     y_pos = torch.full((batch_size,), 1, dtype=torch.long, device=device)
     L_G = criterion(out_fake_for_G, y_pos)
@@ -417,6 +397,11 @@ def GAN_step_MDD_3d_cond_3class(
         'L_G': float(L_G.item()),
         'D_grad_norm': float(D_grad_norm),
         'G_grad_norm': float(G_grad_norm),
+        'P_pos_real_pos': float(prob_real_pos[:, 1].mean().item()),
+        'P_neg_real_neg': float(prob_real_neg[:, 2].mean().item()),
+        'P_fake_fake_D': float(prob_fake_for_D[:, 0].mean().item()),
+        'P_pos_fake_D': float(prob_fake_for_D[:, 1].mean().item()),
+        'P_pos_fake_G': float(prob_fake_for_G[:, 1].mean().item()),
     }
     if L_div is not None:
         report['L_div'] = float(L_div.item())
@@ -429,7 +414,7 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                   train_step_fn, device,
                   diversity_weight=0.0,
                   checkpoint_dir=None, ckpt_interval=None,
-                  smooth_real=0.1, smooth_fake=0.0,
+                  smooth_real=0.1,
                   C_P_full=None, cond_strs=None,
                   eval_every_steps=None, nz=None,
                   start_step=0, d_every=3,
@@ -447,12 +432,18 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
         metrics_file = open(metrics_path, mode, newline='')
         metrics_writer = csv.writer(metrics_file)
         if mode == 'w':
-            metrics_writer.writerow(['step', 'epoch', 'L_D_real', 'L_D_neg', 'L_D_fake', 'L_G', 'D_grad_norm', 'G_grad_norm', 'L_div'])
+            metrics_writer.writerow([
+                'step', 'epoch',
+                'L_D_real', 'L_D_neg', 'L_D_fake', 'L_G',
+                'D_grad_norm', 'G_grad_norm', 'L_div',
+                'P_pos_real_pos', 'P_neg_real_neg',
+                'P_fake_fake_D', 'P_pos_fake_D', 'P_pos_fake_G',
+            ])
 
     steps_range = trange(start_step, num_steps, position=0, leave=True)
     for step in steps_range:
         P_batch, cP = P_loader.get_batch()
-        N_batch, cN = N_loader.get_batch()
+        N_batch, _ = N_loader.get_batch()
         c_batch = cP.to(device)
         P_batch = P_batch.to(device)
         N_batch = N_batch.to(device)
@@ -483,6 +474,11 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                 report.get('D_grad_norm', float('nan')),
                 report.get('G_grad_norm', float('nan')),
                 report.get('L_div', float('nan')),
+                report.get('P_pos_real_pos', float('nan')),
+                report.get('P_neg_real_neg', float('nan')),
+                report.get('P_fake_fake_D', float('nan')),
+                report.get('P_pos_fake_D', float('nan')),
+                report.get('P_pos_fake_G', float('nan')),
             ])
 
         current_G_loss = report.get('L_G', None)
@@ -493,7 +489,7 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
         if checkpoint_dir is not None and ckpt_interval is not None and (step + 1) % ckpt_interval == 0:
             save_checkpoint(step + 1, G, D, G_opt, D_opt, os.path.join(checkpoint_dir, f'ckpt_step_{step+1}.pt'))
 
-        if (checkpoint_dir is not None and eval_every_steps is not None and C_P_full is not None and cond_strs is not None and nz is not None and (step + 1) % eval_every_steps == 0):
+        if checkpoint_dir is not None and eval_every_steps is not None and C_P_full is not None and cond_strs is not None and nz is not None and (step + 1) % eval_every_steps == 0:
             current_epoch = (step + 1) // steps_per_epoch
             samples_subdir = os.path.join(checkpoint_dir, f'epoch_{current_epoch:04d}')
             os.makedirs(samples_subdir, exist_ok=True)
@@ -526,7 +522,53 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
     return D, G, A
 
 
-if __name__ == '__main__':
+def resolve_meta_path(data_path, meta_path=None):
+    if meta_path is not None:
+        return meta_path
+    if data_path.endswith('.npy'):
+        return data_path[:-4] + '_meta.npz'
+    raise ValueError('Could not infer meta path; please provide --meta-path')
+
+
+def get_mass_meta(meta):
+    if 'mass_cutoff_value' not in meta:
+        raise KeyError('Expected mass_cutoff_value in meta file for new BC/load-only dataset')
+    return {
+        'mass_cutoff_value': float(meta['mass_cutoff_value']),
+        'mass_cutoff_method': str(meta['mass_cutoff_method']),
+        'positive_if': str(meta['positive_if']),
+        'conditioning_mode': str(meta['conditioning_mode']),
+        'label_mode': str(meta['label_mode']) if 'label_mode' in meta else 'unknown',
+        'mass_quantile': (None if 'mass_quantile' not in meta or np.isnan(float(meta['mass_quantile'])) else float(meta['mass_quantile'])),
+        'mass_threshold_source': str(meta['mass_threshold_source']) if 'mass_threshold_source' in meta else 'unknown',
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Train UNet-based 3D GAN-MDD on BC/load-conditioned, mass-labeled voxel data.')
+    parser.add_argument('--data-path', type=str, required=True)
+    parser.add_argument('--meta-path', type=str, default=None)
+    parser.add_argument('--checkpoint-root', type=str, required=True)
+    parser.add_argument('--batch-size', type=int, default=32)
+    parser.add_argument('--nz', type=int, default=128)
+    parser.add_argument('--ngf', type=int, default=64)
+    parser.add_argument('--ndf', type=int, default=32)
+    parser.add_argument('--num-epochs', type=int, default=1000)
+    parser.add_argument('--lr-d', type=float, default=2e-4)
+    parser.add_argument('--lr-g', type=float, default=2e-4)
+    parser.add_argument('--smooth-real', type=float, default=0.1)
+    parser.add_argument('--d-every', type=int, default=6)
+    parser.add_argument('--use-label-smoothing', action='store_true')
+    parser.add_argument('--use-diversity-loss', action='store_true')
+    parser.add_argument('--diversity-weight', type=float, default=0.01)
+    parser.add_argument('--n-vis-samples', type=int, default=5)
+    parser.add_argument('--ckpt-every-epochs', type=int, default=5)
+    parser.add_argument('--eval-every-epochs', type=int, default=5)
+    parser.add_argument('--resume-path', type=str, default=None)
+    parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--tag', type=str, default='')
+    args = parser.parse_args()
+
     print('PyTorch version:', torch.__version__)
     print('CUDA available:', torch.cuda.is_available())
     if torch.cuda.is_available():
@@ -535,34 +577,11 @@ if __name__ == '__main__':
     else:
         print('CUDA not available')
 
-    data_root = '/xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/octant'
-    data_path = os.path.join(data_root, '10000_labeled_voxels_32x32x32_octmass_score0.7.npy')
-    meta_path = os.path.join(data_root, '10000_labeled_voxels_32x32x32_octmass_score0.7_meta.npz')
+    meta_path = resolve_meta_path(args.data_path, args.meta_path)
+    meta = np.load(meta_path, allow_pickle=True)
+    meta_info = get_mass_meta(meta)
 
-    meta = np.load(meta_path)
-    cutoff_train = float(meta['cutoff_train'])
-    score_cutoff = float(meta['score_cutoff'])
-    m_min = float(meta['m_min'])
-    m_max = float(meta['m_max'])
-    c_min = float(meta['c_min'])
-    c_max = float(meta['c_max'])
-
-    batch_size = 32
-    nz = 128
-    ngf = 64
-    ndf = 32
-    num_epochs = 1000
-    lr_D = 2e-4
-    lr_G = 2e-4
-    smooth_real = 0.1
-    smooth_fake = 0.0
-    d_every = 6
-    use_label_smoothing = True
-    use_diversity_loss = True
-    diversity_weight = 0.01
-    n_vis_samples = 5
-
-    dataset = CondVoxelDataset(data_path)
+    dataset = CondVoxelDataset(args.data_path)
     pos_mask = (dataset.y == 1)
     neg_mask = (dataset.y == 0)
     P = dataset.X[pos_mask]
@@ -571,23 +590,21 @@ if __name__ == '__main__':
     C_N = dataset.C[neg_mask]
     n_samples = P.shape[0] + N.shape[0]
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(args.device if (args.device != 'cuda' or torch.cuda.is_available()) else 'cpu')
     print('device:', device)
     print('CUDA device count (inside main):', torch.cuda.device_count())
 
     shape3d = P.shape[2:]
     cond_dim = C_P.shape[1]
 
-    netG = CondUNetGenerator3D(nz, ngf, shape3d, cond_dim, cond_channels=8)
-    netD = CondDiscriminator3DImproved(ndf, shape3d, cond_dim, cond_channels=8, nc=3)
+    netG = CondUNetGenerator3D(args.nz, args.ngf, shape3d, cond_dim, cond_channels=8)
+    netD = CondDiscriminator3DImproved(args.ndf, shape3d, cond_dim, cond_channels=8, nc=3)
 
     def count_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    print("Generator params:",
-        count_parameters(unwrap_module(netG)))
-    print("Discriminator params:",
-        count_parameters(unwrap_module(netD)))
+    print('Generator params:', count_parameters(unwrap_module(netG)))
+    print('Discriminator params:', count_parameters(unwrap_module(netD)))
 
     if device.type == 'cuda' and torch.cuda.device_count() > 1:
         print(f'Using DataParallel on {torch.cuda.device_count()} GPUs')
@@ -597,78 +614,87 @@ if __name__ == '__main__':
     netG = netG.to(device)
     netD = netD.to(device)
 
-    P_loader = ReusableDataLoader(P, C_P, batch_size)
-    N_loader = ReusableDataLoader(N, C_N, batch_size)
-    num_steps = num_epochs * len(P) // batch_size
+    P_loader = ReusableDataLoader(P, C_P, args.batch_size)
+    N_loader = ReusableDataLoader(N, C_N, args.batch_size)
+    num_steps = args.num_epochs * len(P) // args.batch_size
 
-    D_opt = optim.Adam(netD.parameters(), lr=lr_D, betas=(0.5, 0.999))
-    G_opt = optim.Adam(netG.parameters(), lr=lr_G, betas=(0.5, 0.999))
+    D_opt = optim.Adam(netD.parameters(), lr=args.lr_d, betas=(0.5, 0.999))
+    G_opt = optim.Adam(netG.parameters(), lr=args.lr_g, betas=(0.5, 0.999))
 
-    base_ckpt_root = '/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_octant'
-    hp_name = f'unet_octmass_epochs{num_epochs}_bs{batch_size}_nz{nz}_ngf{ngf}_ndf{ndf}_nsamp{n_samples}_lrD{lr_D}_lrG{lr_G}_smoothR{smooth_real}_dEvery{d_every}_div{int(use_diversity_loss)}'
+    mode_tag = meta_info['conditioning_mode']
+    label_tag = meta_info['positive_if']
+    extra_tag = f'_{args.tag}' if args.tag else ''
+    hp_name = (
+        f'unet_{mode_tag}_massLabel_{label_tag}_epochs{args.num_epochs}_bs{args.batch_size}_'
+        f'nz{args.nz}_ngf{args.ngf}_ndf{args.ndf}_nsamp{n_samples}_'
+        f'lrD{args.lr_d}_lrG{args.lr_g}_smoothR{args.smooth_real}_'
+        f'dEvery{args.d_every}_div{int(args.use_diversity_loss)}{extra_tag}'
+    )
     timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-    checkpoint_dir = os.path.join(base_ckpt_root, f'{hp_name}_{timestamp}')
+    checkpoint_dir = os.path.join(args.checkpoint_root, f'{hp_name}_{timestamp}')
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    resume_path = None
     start_step = 0
-    if resume_path is not None:
-        print(f'Resuming from checkpoint: {resume_path}')
-        netG, netD, G_opt, D_opt, start_step = load_checkpoint(resume_path, netG, netD, G_opt, D_opt, device)
+    if args.resume_path is not None:
+        print(f'Resuming from checkpoint: {args.resume_path}')
+        netG, netD, G_opt, D_opt, start_step = load_checkpoint(args.resume_path, netG, netD, G_opt, D_opt, device)
     else:
         print('Starting from scratch')
 
     with open(os.path.join(checkpoint_dir, 'hparams.txt'), 'w') as f_hp:
-        f_hp.write(f'lr_D = {lr_D}\n')
-        f_hp.write(f'lr_G = {lr_G}\n')
-        f_hp.write(f'smooth_real = {smooth_real}\n')
-        f_hp.write(f'smooth_fake = {smooth_fake}\n')
-        f_hp.write(f'd_every = {d_every}\n')
-        f_hp.write(f'use_label_smoothing = {use_label_smoothing}\n')
-        f_hp.write(f'use_diversity_loss = {use_diversity_loss}\n')
-        f_hp.write(f'diversity_weight = {diversity_weight}\n')
-        f_hp.write(f'batch_size = {batch_size}\n')
-        f_hp.write(f'num_epochs = {num_epochs}\n')
-        f_hp.write(f'nz = {nz}, ngf = {ngf}, ndf = {ndf}\n')
+        f_hp.write(f'lr_D = {args.lr_d}\n')
+        f_hp.write(f'lr_G = {args.lr_g}\n')
+        f_hp.write(f'smooth_real = {args.smooth_real}\n')
+        f_hp.write(f'd_every = {args.d_every}\n')
+        f_hp.write(f'use_label_smoothing = {args.use_label_smoothing}\n')
+        f_hp.write(f'use_diversity_loss = {args.use_diversity_loss}\n')
+        f_hp.write(f'diversity_weight = {args.diversity_weight}\n')
+        f_hp.write(f'batch_size = {args.batch_size}\n')
+        f_hp.write(f'num_epochs = {args.num_epochs}\n')
+        f_hp.write(f'nz = {args.nz}, ngf = {args.ngf}, ndf = {args.ndf}\n')
         f_hp.write(f'n_samples = {n_samples}\n')
-        f_hp.write(f'score_cutoff_quantile_train = {score_cutoff}\n')
-        f_hp.write(f'score_cutoff_value_train = {cutoff_train}\n')
         f_hp.write(f'cond_dim = {cond_dim}\n')
-        f_hp.write(f'data_path = {data_path}\n')
-        f_hp.write('conditioning = broadcast + FiLM in G, broadcast + projection in D\n')
+        f_hp.write(f'data_path = {args.data_path}\n')
+        f_hp.write(f'meta_path = {meta_path}\n')
+        f_hp.write(f'mass_cutoff_value = {meta_info["mass_cutoff_value"]:.6f}\n')
+        f_hp.write(f'mass_cutoff_method = {meta_info["mass_cutoff_method"]}\n')
+        f_hp.write(f'mass_threshold_source = {meta_info["mass_threshold_source"]}\n')
+        f_hp.write(f'mass_quantile = {meta_info["mass_quantile"]}\n')
+        f_hp.write(f'positive_if = {meta_info["positive_if"]}\n')
+        f_hp.write(f'conditioning_mode = {meta_info["conditioning_mode"]}\n')
+        f_hp.write(f'label_mode = {meta_info["label_mode"]}\n')
+        f_hp.write('conditioning = UNet: broadcast + FiLM in G, broadcast + projection in D\n')
 
-    steps_per_epoch = max(1, len(P) // batch_size)
-    ckpt_epochs = 5
-    ckpt_interval = ckpt_epochs * steps_per_epoch
-    eval_every_epochs = 5
-    eval_every_steps = eval_every_epochs * steps_per_epoch
+    steps_per_epoch = max(1, len(P) // args.batch_size)
+    ckpt_interval = args.ckpt_every_epochs * steps_per_epoch
+    eval_every_steps = args.eval_every_epochs * steps_per_epoch
 
     netD, netG, _ = train_3d_cond(
         netD, netG, None,
         D_opt, G_opt, None,
         P_loader, N_loader,
-        num_steps, batch_size, nz,
+        num_steps, args.batch_size, args.nz,
         GAN_step_MDD_3d_cond_3class,
         device,
-        diversity_weight=diversity_weight,
+        diversity_weight=args.diversity_weight,
         checkpoint_dir=checkpoint_dir,
         ckpt_interval=ckpt_interval,
-        smooth_real=smooth_real,
-        smooth_fake=smooth_fake,
+        smooth_real=args.smooth_real,
         C_P_full=C_P,
         cond_strs=dataset.cond_strs,
         eval_every_steps=eval_every_steps,
-        nz=nz,
+        nz=args.nz,
         start_step=start_step,
-        d_every=d_every,
-        use_label_smoothing=use_label_smoothing,
-        use_diversity_loss=use_diversity_loss,
-        n_vis_samples=n_vis_samples)
+        d_every=args.d_every,
+        use_label_smoothing=args.use_label_smoothing,
+        use_diversity_loss=args.use_diversity_loss,
+        n_vis_samples=args.n_vis_samples,
+    )
 
     netG.eval()
     with torch.no_grad():
-        z = torch.randn(batch_size, nz, device=device)
-        idx_vis = torch.randint(low=0, high=C_P.shape[0], size=(batch_size,))
+        z = torch.randn(args.batch_size, args.nz, device=device)
+        idx_vis = torch.randint(low=0, high=C_P.shape[0], size=(args.batch_size,))
         c_vis = C_P[idx_vis].to(device)
         fake = netG(z, c_vis).cpu().numpy()
         cond_strs_vis = [dataset.cond_strs[int(i)] for i in idx_vis.cpu().numpy()]
@@ -678,55 +704,62 @@ if __name__ == '__main__':
         txt_path = os.path.join(checkpoint_dir, 'fake_voxel_conditions_final.txt')
         with open(txt_path, 'w') as f_txt:
             f_txt.write('# idx  filename  condition_vector  condition_string\n')
-            for idx in range(batch_size):
+            for idx in range(args.batch_size):
                 filename = f'fake_voxel_{idx}.png'
                 fig_path = os.path.join(checkpoint_dir, filename)
                 plot_voxel_grid_3d(fake[idx, 0], title=f'Fake sample {idx}', save_path=fig_path)
                 cond_str_num = ' '.join(f'{v:.6f}' for v in cond_np[idx])
                 f_txt.write(f'{idx:03d}  {filename}  {cond_str_num}  {cond_strs_vis[idx]}\n')
 
-    print(f'Saved voxel plots and fake_voxel_conditions_final.txt for {batch_size} fake samples.')
+    print(f'Saved voxel plots and fake_voxel_conditions_final.txt for {args.batch_size} fake samples.')
 
     batches_eval = 10
-    all_scores = []
     all_mass = []
-    all_comp = []
     all_div = []
     netG.eval()
     with torch.no_grad():
         for _ in trange(batches_eval):
-            z = torch.randn(batch_size, nz, device=device)
-            idx_eval = torch.randint(low=0, high=C_P.shape[0], size=(batch_size,))
+            z = torch.randn(args.batch_size, args.nz, device=device)
+            idx_eval = torch.randint(low=0, high=C_P.shape[0], size=(args.batch_size,))
             c_eval = C_P[idx_eval].to(device)
             fake = netG(z, c_eval).cpu().numpy()
             fake_bin = (fake > 0.0).astype(np.float64)
             batch_np = fake_bin[:, 0, :, :, :]
-            score, mass_fracs, comp_vals = score_batch_mass_compactness(batch_np, m_min, m_max, c_min, c_max)
-            all_scores.append(score)
+            mass_fracs = mass_fraction_batch(batch_np)
             all_mass.append(mass_fracs)
-            all_comp.append(comp_vals)
             div_val = eval_dpp_div_from_voxels(batch_np, device=device)
             all_div.append(div_val)
 
-    all_scores = np.concatenate(all_scores)
     all_mass = np.concatenate(all_mass)
-    all_comp = np.concatenate(all_comp)
-    positive_rate = float((all_scores < cutoff_train).mean() * 100.0)
+    cutoff = meta_info['mass_cutoff_value']
+    if meta_info['positive_if'] == 'low_mass':
+        positive_rate = float((all_mass <= cutoff).mean() * 100.0)
+    elif meta_info['positive_if'] == 'high_mass':
+        positive_rate = float((all_mass >= cutoff).mean() * 100.0)
+    else:
+        raise ValueError(f"Unexpected positive_if in meta: {meta_info['positive_if']}")
+
     mean_mass = float(all_mass.mean())
-    mean_comp = float(all_comp.mean())
     mean_diversity = float(np.mean(all_div))
-    print('Training quantile (score_cutoff):', score_cutoff)
-    print('Training raw cutoff value (cutoff_train):', cutoff_train)
-    print('Mass+compactness positive rate wrt TRAIN cutoff (%):', positive_rate)
+    print('Mass cutoff value:', cutoff)
+    print('Mass cutoff method:', meta_info['mass_cutoff_method'])
+    print('positive_if:', meta_info['positive_if'])
+    print('Mass-labeled positive rate wrt TRAIN cutoff (%):', positive_rate)
     print('Mean mass fraction:', mean_mass)
-    print('Mean compactness:', mean_comp)
     print('Mean DPP diversity:', mean_diversity)
 
-    results_txt = os.path.join(checkpoint_dir, 'evaluation_mass_compactness.txt')
+    results_txt = os.path.join(checkpoint_dir, 'evaluation_mass.txt')
     with open(results_txt, 'w') as f:
-        f.write(f'score_cutoff_quantile_train: {score_cutoff:.4f}\n')
-        f.write(f'score_cutoff_value_train: {cutoff_train:.6f}\n')
-        f.write(f'Mass+compactness positive rate wrt train cutoff (%): {positive_rate:.4f}\n')
+        f.write(f'mass_cutoff_value_train: {cutoff:.6f}\n')
+        f.write(f'mass_cutoff_method_train: {meta_info["mass_cutoff_method"]}\n')
+        f.write(f'mass_threshold_source: {meta_info["mass_threshold_source"]}\n')
+        f.write(f'mass_quantile: {meta_info["mass_quantile"]}\n')
+        f.write(f'positive_if: {meta_info["positive_if"]}\n')
+        f.write(f'conditioning_mode: {meta_info["conditioning_mode"]}\n')
+        f.write(f'Label-positive rate wrt train mass cutoff (%): {positive_rate:.4f}\n')
         f.write(f'Mean mass fraction: {mean_mass:.6f}\n')
-        f.write(f'Mean compactness: {mean_comp:.6f}\n')
         f.write(f'Mean DPP diversity: {mean_diversity:.6f}\n')
+
+
+if __name__ == '__main__':
+    main()
