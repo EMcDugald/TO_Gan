@@ -190,8 +190,73 @@ def plot_single_run(df, checkpoint_dir, meta, rolling=0):
     out_path2 = os.path.join(checkpoint_dir, 'training_metrics_detailed.png')
     save_plot(fig2, out_path2)
 
+    # # ---- Figure 3: probability diagnostics ----
+    # # Only create if at least one probability column is non‑NaN
+    # prob_cols = [
+    #     ('P_pos_real_pos', 'P(class=1 | real pos)'),
+    #     ('P_neg_real_neg', 'P(class=2 | real neg)'),
+    #     ('P_fake_fake_D',  'P(class=0 | fake, D)'),
+    #     ('P_pos_fake_D',   'P(class=1 | fake, D)'),
+    #     ('P_pos_fake_G',   'P(class=1 | fake, G)'),
+    # ]
+    # has_any_prob = any(col in df.columns and not df[col].isna().all()
+    #                    for col, _ in prob_cols)
+    # if has_any_prob:
+    #     fig3, axes3 = plt.subplots(2, 1, figsize=(12, 8), sharex=False)
+    #     fig3.suptitle(f'GAN Probability Diagnostics: {title_suffix}', fontsize=14)
+
+    #     # Panel 1: discriminator probabilities vs step (real/fake)
+    #     ax = axes3[0]
+    #     for col, label in [
+    #         ('P_pos_real_pos', 'P(class=1 | real pos)'),
+    #         ('P_neg_real_neg', 'P(class=2 | real neg)'),
+    #         ('P_fake_fake_D',  'P(class=0 | fake, D)'),
+    #         ('P_pos_fake_D',   'P(class=1 | fake, D)'),
+    #     ]:
+    #         if col in df.columns and not df[col].isna().all():
+    #             ax.plot(
+    #                 x_step,
+    #                 maybe_smooth(df[col], rolling),
+    #                 label=label,
+    #                 alpha=0.85
+    #             )
+    #     ax.set_xlabel('Step')
+    #     ax.set_ylabel('Probability')
+    #     ax.set_ylim(0.0, 1.0)
+    #     ax.set_title('Discriminator probabilities vs step')
+    #     ax.grid(True, alpha=0.3)
+    #     ax.legend(fontsize=8)
+
+    #     # Panel 2: generator-target probability vs step
+    #     ax = axes3[1]
+    #     col = 'P_pos_fake_G'
+    #     if col in df.columns and not df[col].isna().all():
+    #         ax.plot(
+    #             x_step,
+    #             df[col],
+    #             color='blue',
+    #             alpha=0.25,
+    #             label='P(class=1 | fake, G) raw'
+    #         )
+    #         ax.plot(
+    #             x_step,
+    #             maybe_smooth(df[col], max(rolling, 25) if rolling == 0 else rolling),
+    #             color='black',
+    #             linewidth=2,
+    #             label='P(class=1 | fake, G) smooth'
+    #         )
+    #     ax.set_xlabel('Step')
+    #     ax.set_ylabel('Probability')
+    #     ax.set_ylim(0.0, 1.0)
+    #     ax.set_title('Generator success probability vs step')
+    #     ax.grid(True, alpha=0.3)
+    #     ax.legend()
+
+    #     out_path3 = os.path.join(checkpoint_dir, 'training_metrics_probs.png')
+    #     save_plot(fig3, out_path3)
+
     # ---- Figure 3: probability diagnostics ----
-    # Only create if at least one probability column is non‑NaN
+    # Less busy version: split into real/fake/G panels and use stronger smoothing.
     prob_cols = [
         ('P_pos_real_pos', 'P(class=1 | real pos)'),
         ('P_neg_real_neg', 'P(class=2 | real neg)'),
@@ -201,59 +266,83 @@ def plot_single_run(df, checkpoint_dir, meta, rolling=0):
     ]
     has_any_prob = any(col in df.columns and not df[col].isna().all()
                        for col, _ in prob_cols)
+
     if has_any_prob:
-        fig3, axes3 = plt.subplots(2, 1, figsize=(12, 8), sharex=False)
+        prob_rolling = rolling if rolling and rolling > 1 else 50
+
+        fig3, axes3 = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
         fig3.suptitle(f'GAN Probability Diagnostics: {title_suffix}', fontsize=14)
 
-        # Panel 1: discriminator probabilities vs step (real/fake)
+        # Panel 1: real-sample classification probabilities
         ax = axes3[0]
-        for col, label in [
-            ('P_pos_real_pos', 'P(class=1 | real pos)'),
-            ('P_neg_real_neg', 'P(class=2 | real neg)'),
-            ('P_fake_fake_D',  'P(class=0 | fake, D)'),
-            ('P_pos_fake_D',   'P(class=1 | fake, D)'),
+        for col, label, color in [
+            ('P_pos_real_pos', 'P(class=1 | real pos)', 'tab:green'),
+            ('P_neg_real_neg', 'P(class=2 | real neg)', 'tab:orange'),
         ]:
             if col in df.columns and not df[col].isna().all():
                 ax.plot(
                     x_step,
-                    maybe_smooth(df[col], rolling),
+                    maybe_smooth(df[col], prob_rolling),
                     label=label,
-                    alpha=0.85
+                    color=color,
+                    linewidth=2.2,
                 )
-        ax.set_xlabel('Step')
         ax.set_ylabel('Probability')
         ax.set_ylim(0.0, 1.0)
-        ax.set_title('Discriminator probabilities vs step')
+        ax.set_title('Real-sample classification')
         ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=8)
+        ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), fontsize=8)
 
-        # Panel 2: generator-target probability vs step
+        # Panel 2: fake-sample discriminator probabilities
         ax = axes3[1]
+        for col, label, color in [
+            ('P_fake_fake_D', 'P(class=0 | fake, D)', 'tab:red'),
+            ('P_pos_fake_D',  'P(class=1 | fake, D)', 'tab:purple'),
+        ]:
+            if col in df.columns and not df[col].isna().all():
+                ax.plot(
+                    x_step,
+                    maybe_smooth(df[col], prob_rolling),
+                    label=label,
+                    color=color,
+                    linewidth=2.2,
+                )
+        ax.set_ylabel('Probability')
+        ax.set_ylim(0.0, 1.0)
+        ax.set_title('Fake-sample discriminator outputs')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), fontsize=8)
+
+        # Panel 3: generator success probability
+        ax = axes3[2]
         col = 'P_pos_fake_G'
         if col in df.columns and not df[col].isna().all():
             ax.plot(
                 x_step,
                 df[col],
-                color='blue',
-                alpha=0.25,
-                label='P(class=1 | fake, G) raw'
+                color='tab:blue',
+                alpha=0.12,
+                linewidth=1.0,
+                label='raw'
             )
             ax.plot(
                 x_step,
-                maybe_smooth(df[col], max(rolling, 25) if rolling == 0 else rolling),
+                maybe_smooth(df[col], prob_rolling),
                 color='black',
-                linewidth=2,
-                label='P(class=1 | fake, G) smooth'
+                linewidth=2.5,
+                label=f'smoothed ({prob_rolling})'
             )
         ax.set_xlabel('Step')
         ax.set_ylabel('Probability')
         ax.set_ylim(0.0, 1.0)
-        ax.set_title('Generator success probability vs step')
+        ax.set_title('Generator success probability')
         ax.grid(True, alpha=0.3)
-        ax.legend()
+        ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), fontsize=8)
 
+        fig3.tight_layout(rect=[0, 0, 0.84, 0.96])
         out_path3 = os.path.join(checkpoint_dir, 'training_metrics_probs.png')
-        save_plot(fig3, out_path3)
+        fig3.savefig(out_path3, dpi=300, bbox_inches='tight')
+        plt.close(fig3)
 
 
 def plot_overlay(runs, overlay_name='training_metrics_overlay.png', rolling=0):
