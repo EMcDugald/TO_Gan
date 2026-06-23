@@ -284,3 +284,46 @@ python visualize_train_data_v2.py \
   --n-spatial-bins 10 \
   --max-plots 10 \
   --rng-seed 0
+
+
+  python plot_train_metrics_gan_mdd_v2.py /xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_fine_v2/fine_massLabel_low_mass_epochs1000_bs16_nz300_ngf256_ndf64_nsamp7500_lrD0.0002_lrG0.0002_smoothR0.1_dEvery5_div1_coarse_run_20260621-173442
+
+  python plot_train_metrics_gan_mdd_unet_v2.py /xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_fine_unet_v2/unet_fine_massLabel_low_mass_epochs1000_bs16_nz128_ngf64_ndf32_nsamp7500_lrD0.0002_lrG0.0002_smoothR0.1_dEvery5_div1_fine_run_20260621-173929
+
+
+
+  python sample_nonunet_gan.py \
+  --checkpoint-dir /path/to/nonunet_run \
+  --ckpt-id final \
+  --num-cond-vectors 4 \
+  --samples-per-cond 8
+
+
+  python sample_unet_gan.py \
+  --checkpoint-dir /path/to/unet_run \
+  --ckpt-id best \
+  --num-cond-vectors 3 \
+  --samples-per-cond 5
+
+
+  python conditional_diffusion_data.py \
+  --data-root ./data \
+  --outdir /xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/diffusion_fine \
+  --shape 32 32 32 \
+  --n-samples 7500 \
+  --conditioning-mode fine \
+  --n-spatial-bins 10 \
+  --positive-if low_mass \
+  --rng-seed 0
+
+
+
+  python conditional_diffusion_data.py \
+  --data-root ./data \
+  --outdir /xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/diffusion_coarse \
+  --shape 32 32 32 \
+  --n-samples 7500 \
+  --conditioning-mode coarse \
+  --n-spatial-bins 10 \
+  --positive-if low_mass \
+  --rng-seed 0

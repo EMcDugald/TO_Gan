@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=cgan_mdd_v2
+#SBATCH --job-name=cgan_mdd_coarse_v2
 #SBATCH --account=hdb
 #SBATCH --partition=gpu_standard
 #SBATCH --nodes=1
@@ -8,7 +8,7 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=12:00:00
-#SBATCH --output=cgan_mdd_v2_%j.out
+#SBATCH --output=cgan_mdd_coarse_v2_%j.out
 
 module load cuda11
 module load anaconda
@@ -19,12 +19,12 @@ PYTHON="$HOME/.conda/envs/to_gan/bin/python"
 # Paths and dataset choice
 # -------------------------
 # Choose either fine or coarse dataset here:
-DATA_FILE="/xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/fine/7500_labeled_voxels_32x32x32_fine_bcLoadOnly_massLabel_low_mass_thr0.494781.npy"
+DATA_FILE="/xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/coarse/7500_labeled_voxels_32x32x32_coarse_bcLoadOnly_massLabel_low_mass_thr0.494781.npy"
 
-CHECKPOINT_ROOT="/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_fine_v2"
+CHECKPOINT_ROOT="/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_coarse_v2"
 SCRIPT="$HOME/TO_Gan/PoC_3d/train_GAN_MDD_323232.py"
 
-TAG="fine_run"   # e.g. fine_run, coarse_run, highmass_run
+TAG="coarse_run"   # e.g. fine_run, coarse_run, highmass_run
 DEVICE="cuda"
 
 BATCH_SIZE=16
