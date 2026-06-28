@@ -300,18 +300,13 @@ def get_bin_centers(edges):
 def decode_condition_overlay(cond_vec, meta):
     """
     Decode BC points and load point/dir from a condition vector created by
-    generate_voxels_mass_conditioned_with_label_in_cond.
-
-    Assumes cond = [base_cond_vec, label_bit].
+    generate_voxels_mass_conditioned (label is stored separately, not in cond_vec).
     """
     cond_vec = np.asarray(cond_vec, dtype=np.float32)
-    cond_dim = cond_vec.shape[0]
 
-    label_idx = int(meta['label_index_in_condition']) if 'label_index_in_condition' in meta else (cond_dim - 1)
-    base_dim = int(meta['base_cond_dim']) if 'base_cond_dim' in meta else label_idx
-
-    base = cond_vec[:base_dim]
-    label_bit = float(cond_vec[label_idx])
+    # In this pipeline cond_vec is already the full conditioning vector.
+    base = cond_vec
+    label_bit = None  # no embedded label bit
 
     conditioning_mode = str(meta['conditioning_mode'])
     max_bc_points = int(meta['bc_count_max'])
@@ -686,7 +681,7 @@ def train_3d_cond(
 
                     filename = f'fake_voxel_{i}.png'
                     fig_path = os.path.join(samples_subdir, filename)
-                    title = f'Fake sample {i} (epoch {current_epoch}) | mode={mode_tag} | label={label_bit:.0f}'
+                    title = f'Fake sample {i} (epoch {current_epoch}) | mode={mode_tag}'
                     plot_voxel_grid_3d(
                         fake[i, 0],
                         title=title,
@@ -906,7 +901,7 @@ def main():
                 fig_path = os.path.join(checkpoint_dir, filename)
                 plot_voxel_grid_3d(
                     fake[idx, 0],
-                    title=f'Fake sample {idx} | mode={mode_tag} | label={label_bit:.0f}',
+                    title=f'Fake sample {idx} | mode={mode_tag}',
                     save_path=fig_path,
                     bc_points=bc_points,
                     load_point=load_point,

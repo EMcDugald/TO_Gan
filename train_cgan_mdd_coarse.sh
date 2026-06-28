@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
-#SBATCH --time=12:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=cgan_mdd_coarse_v2_%j.out
 
 module load cuda11
@@ -21,24 +21,24 @@ PYTHON="$HOME/.conda/envs/to_gan/bin/python"
 # Choose either fine or coarse dataset here:
 DATA_FILE="/xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/coarse/7500_labeled_voxels_32x32x32_coarse_bcLoadOnly_massLabel_low_mass_thr0.494781.npy"
 
-CHECKPOINT_ROOT="/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_coarse_v2"
-SCRIPT="$HOME/TO_Gan/PoC_3d/train_GAN_MDD_323232.py"
+CHECKPOINT_ROOT="/xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_coarse_v2_2"
+SCRIPT="$HOME/TO_Gan/PoC_3d/train_GAN_MDD_323232_v2.py"
 
 TAG="coarse_run"   # e.g. fine_run, coarse_run, highmass_run
 DEVICE="cuda"
 
-BATCH_SIZE=16
-N_EPOCHS=1000
+BATCH_SIZE=32
+N_EPOCHS=500
 NZ=512
 NGF=256
-NDF=64
-LR_D=1e-4
-LR_G=1e-4
-SMOOTH_REAL=0.1
-D_EVERY=8
+NDF=128
+LR_D=5e-5
+LR_G=5e-5
+SMOOTH_REAL=0.05
+D_EVERY=7
 CKPT_EVERY_EPOCHS=10
 EVAL_EVERY_EPOCHS=10
-N_VIS_SAMPLES=4
+N_VIS_SAMPLES=5
 
 # -------------------------
 # Sanity prints

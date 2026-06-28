@@ -327,3 +327,27 @@ python visualize_train_data_v2.py \
   --n-spatial-bins 10 \
   --positive-if low_mass \
   --rng-seed 0
+
+
+
+
+    ### good run here !!! ###
+    python plot_train_metrics_gan_mdd_v2.py /xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_coarse_v2/coarse_massLabel_low_mass_epochs1000_bs16_nz512_ngf256_ndf64_nsamp7500_lrD0.0001_lrG0.0001_smoothR0.1_dEvery8_div1_coarse_run_20260623-031502
+
+    ### good run here !!! ###
+    python plot_train_metrics_gan_mdd_unet_v2.py /xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_coarse_unet_v2/unet_coarse_massLabel_low_mass_epochs1000_bs16_nz128_ngf32_ndf16_nsamp7500_lrD0.0001_lrG0.0001_smoothR0.1_dEvery8_div1_coarse_run_20260623-070340
+
+
+    python plot_train_metrics_gan_mdd_v2.py /xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_fine_v2/fine_massLabel_low_mass_epochs1000_bs16_nz512_ngf256_ndf64_nsamp7500_lrD0.0001_lrG0.0001_smoothR0.1_dEvery8_div1_fine_run_20260622-200621
+
+    ### good run here !!! ###
+    python plot_train_metrics_gan_mdd_unet_v2.py /xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_fine_unet_v2/unet_fine_massLabel_low_mass_epochs1000_bs16_nz128_ngf32_ndf16_nsamp7500_lrD0.0001_lrG0.0001_smoothR0.1_dEvery8_div1_fine_run_20260623-025750
+
+    ### GAN-MDD SAMPLER (ONLY TESTED FOR FINE MODE) ###
+
+  python gan_mdd_v2_sampler.py \
+  --checkpoint-dir /xdisk/hdb/emcdugald/to_cond_gan/checkpoints_323232_fine_v2_2/fine_massLabel_low_mass_epochs500_bs16_nz512_ngf256_ndf128_nsamp7500_lrD0.0001_lrG0.0001_smoothR0.1_dEvery6_div1_fine_run_20260624-220450 \
+  --ckpt-id best \
+  --M 12 \
+  --N 6 \
+  --use-positives-only

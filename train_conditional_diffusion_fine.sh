@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=cond_diff_fine
+#SBATCH --job-name=cond_diff_fine_0626
 #SBATCH --account=hdb
 #SBATCH --partition=gpu_standard
 #SBATCH --nodes=1
@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
-#SBATCH --time=24:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=cond_diff_fine_%j.out
 
 module load cuda11
@@ -15,13 +15,13 @@ module load anaconda
 
 PYTHON="$HOME/.conda/envs/to_gan/bin/python"
 SCRIPT="$HOME/TO_Gan/PoC_3d/train_conditional_diffusion.py"
-DATA_FILE="/xdisk/hdb/emcdugald/to_cond_diffusion/train_data/323232/diffusion_fine/7500_condLabel_voxels_32x32x32_fine_bcLoad_massLabelInCond_low_mass_thr0.704998.npy"
-LOG_ROOT="/xdisk/hdb/emcdugald/to_cond_diffusion/checkpoints_323232_diffusion_fine"
+DATA_FILE="/xdisk/hdb/emcdugald/to_cond_gan/train_data/323232/diffusion_fine/7500_condLabel_voxels_32x32x32_fine_bcLoad_massLabelInCond_low_mass_thr0.704998.npy"
+LOG_ROOT="/xdisk/hdb/emcdugald/to_cond_diffusion/checkpoints_323232_diffusion_fine_0626"
 DEVICE="cuda"
 
 BATCHSIZE=4
 NEPOCHS=500
-LR=1e-4
+LR=5e-5
 UNET_CH1=32
 UNET_CH2=64
 UNET_CH3=128
