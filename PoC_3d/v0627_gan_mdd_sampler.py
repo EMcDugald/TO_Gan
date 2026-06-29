@@ -1,0 +1,424 @@
+import argparse
+import os
+import sys
+import json
+
+import numpy as np
+import torch
+
+# -------------------------------------------------------------------------
+# Path setup: adjust these to your actual repo layout
+# -------------------------------------------------------------------------
+
+# Example: trainers live in PoC_3d/ alongside this sampler
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(THIS_DIR)
+
+# If trainers live elsewhere, update these sys.path inserts.
+sys.path.insert(0, THIS_DIR)      # e.g. v0627_sampler.py + trainers in same dir
+sys.path.insert(0, REPO_ROOT)     # repo root if needed
+
+# Trainer module names — change if your files differ
+NONUNET_TRAINER_MODULE = "v0627_gan_mdd_trainer"
+UNET_TRAINER_MODULE = "v0627_gan_mdd_unet_trainer"
+
+
+# -------------------------------------------------------------------------
+# Helper to import architecture-specific pieces
+# -------------------------------------------------------------------------
+
+def import_trainer(arch):
+    """
+    Import CondVoxelDataset, generator, decode_condition_overlay, plot_voxel_grid_3d,
+    unwrap_module, load_checkpoint from the appropriate trainer module.
+
+    arch: "nonunet" or "unet"
+    """
+    if arch == "nonunet":
+        mod = __import__(NONUNET_TRAINER_MODULE, fromlist=[
+            "CondVoxelDataset",
+            "CondGenerator3d",
+            "decode_condition_overlay",
+            "plot_voxel_grid_3d",
+            "unwrap_module",
+            "load_checkpoint",
+        ])
+        CondVoxelDataset = mod.CondVoxelDataset
+        GenClass = mod.CondGenerator3d
+        decode_condition_overlay = mod.decode_condition_overlay
+        plot_voxel_grid_3d = mod.plot_voxel_grid_3d
+        unwrap_module = mod.unwrap_module
+        load_checkpoint = mod.load_checkpoint
+
+        gen_kind = "CondGenerator3d"
+
+    elif arch == "unet":
+        mod = __import__(UNET_TRAINER_MODULE, fromlist=[
+            "CondVoxelDataset",
+            "CondUNetGenerator3D",
+            "decode_condition_overlay",
+            "plot_voxel_grid_3d",
+            "unwrap_module",
+            "load_checkpoint",
+        ])
+        CondVoxelDataset = mod.CondVoxelDataset
+        GenClass = mod.CondUNetGenerator3D
+        decode_condition_overlay = mod.decode_condition_overlay
+        plot_voxel_grid_3d = mod.plot_voxel_grid_3d
+        unwrap_module = mod.unwrap_module
+        load_checkpoint = mod.load_checkpoint
+
+        gen_kind = "CondUNetGenerator3D"
+
+    else:
+        raise ValueError(f"Unsupported arch {arch!r}; expected 'nonunet' or 'unet'")
+
+    return {
+        "CondVoxelDataset": CondVoxelDataset,
+        "GenClass": GenClass,
+        "decode_condition_overlay": decode_condition_overlay,
+        "plot_voxel_grid_3d": plot_voxel_grid_3d,
+        "unwrap_module": unwrap_module,
+        "load_checkpoint": load_checkpoint,
+        "gen_kind": gen_kind,
+    }
+
+
+# -------------------------------------------------------------------------
+# Manifest and selection utilities
+# -------------------------------------------------------------------------
+
+def resolve_meta_path(data_path, meta_path=None):
+    if meta_path is not None:
+        return meta_path
+    if data_path.endswith(".npy"):
+        return data_path[:-4] + "_meta.npz"
+    raise ValueError("Could not infer meta path; please provide --meta-path")
+
+
+def select_indices(n_total, sample_idx, n_random, rng_seed):
+    """
+    Single explicit index or N random indices (without replacement).
+    """
+    if sample_idx is not None:
+        if sample_idx < 0 or sample_idx >= n_total:
+            raise ValueError(f"sample_idx {sample_idx} out of range for {n_total} samples")
+        return [int(sample_idx)], {"selection_mode": "single", "rng_seed": None}
+
+    if n_random is None or n_random <= 0:
+        raise ValueError("When --sample-idx is not used, --n-random must be positive")
+
+    n_pick = min(int(n_random), int(n_total))
+    rng = np.random.default_rng(rng_seed)
+    picks = sorted(rng.choice(n_total, size=n_pick, replace=False).tolist())
+    return picks, {"selection_mode": "random", "rng_seed": int(rng_seed)}
+
+
+# -------------------------------------------------------------------------
+# Core sampling routine
+# -------------------------------------------------------------------------
+
+def run_sampler(
+    arch,
+    data_path,
+    meta_path,
+    checkpoint_path,
+    outdir,
+    nz,
+    n_samples,
+    sample_idx,
+    rng_seed,
+    device_str,
+):
+    # Import trainer-specific pieces
+    trainer = import_trainer(arch)
+    CondVoxelDataset = trainer["CondVoxelDataset"]
+    GenClass = trainer["GenClass"]
+    decode_condition_overlay = trainer["decode_condition_overlay"]
+    plot_voxel_grid_3d = trainer["plot_voxel_grid_3d"]
+    unwrap_module = trainer["unwrap_module"]
+    load_checkpoint = trainer["load_checkpoint"]
+    gen_kind = trainer["gen_kind"]
+
+    os.makedirs(outdir, exist_ok=True)
+
+    # Device
+    if device_str == "cuda" and torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+    print(f"[sampler] device: {device}")
+
+    # Load meta
+    meta_path = resolve_meta_path(data_path, meta_path)
+    print(f"[sampler] meta path: {meta_path}")
+    meta = np.load(meta_path, allow_pickle=True)
+
+    # Load dataset
+    dataset = CondVoxelDataset(data_path)
+    # dataset.X: (N, 1, D, H, W), dataset.C: (N, cond_dim)
+    X = dataset.X
+    C = dataset.C
+    cond_strs = dataset.cond_strs
+    n_total = X.shape[0]
+    print(f"[sampler] total dataset samples: {n_total}")
+
+    # Shape and cond dimension
+    shape3d = X.shape[2:]
+    cond_dim = C.shape[1]
+    print(f"[sampler] shape3d={shape3d}, cond_dim={cond_dim}")
+
+    # Instantiate generator
+    if arch == "nonunet":
+        # CondGenerator3d(nz, ngf, output_shape, cond_dim, cond_embed_dim=32)
+        # We don't strictly need ngf for sampling, but to load weights correctly we must match training.
+        # For sampling script, we require user to specify ngf to match the checkpoint.
+        raise RuntimeError(
+            "For nonunet arch, please provide ngf and re-run. "
+            "You can extend this sampler to accept --ngf similarly to nz."
+        )
+    elif arch == "unet":
+        # For UNet, we also need base_ch (ngf at training). Use nz + ngf from checkpoint naming or CLI.
+        raise RuntimeError(
+            "For unet arch, please provide ngf and re-run. "
+            "You can extend this sampler to accept --ngf similarly to nz."
+        )
+
+    # NOTE:
+    # The above RuntimeError blocks use here; see below for full version that includes --ngf.
+    # To keep this script self-contained and runnable, we add ngf as an argument and
+    # instantiate correctly for both arches.
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Sample v0627 3D GAN-MDD checkpoints (non-UNet or UNet) on BC/load-conditioned voxel data."
+    )
+
+    parser.add_argument("--arch", type=str, choices=["nonunet", "unet"], required=True,
+                        help="Generator architecture: nonunet (CondGenerator3d) or unet (CondUNetGenerator3D).")
+
+    parser.add_argument("--data-path", type=str, required=True,
+                        help="Path to the BC/load-conditioned train-data .npy file (same format as trainers).")
+    parser.add_argument("--meta-path", type=str, default=None,
+                        help="Optional explicit meta .npz path; if omitted, inferred as data_path[:-4] + '_meta.npz'.")
+
+    parser.add_argument("--checkpoint-path", type=str, required=True,
+                        help="Path to a GAN checkpoint .pt file (ckpt_best.pt, ckpt_step_*.pt, or ckpt_final.pt).")
+
+    parser.add_argument("--outdir", type=str, required=True,
+                        help="Output directory for PNGs + JSON manifest.")
+
+    parser.add_argument("--nz", type=int, required=True,
+                        help="Noise dimension (must match the trainer used for the checkpoint).")
+    parser.add_argument("--ngf", type=int, required=True,
+                        help="Base channel count in G (ngf at training time).")
+    parser.add_argument("--n-per-cond", type=int, default=4,
+                        help="Number of generated samples to draw per selected condition.")
+
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--sample-idx", type=int, default=None,
+                       help="Visualize exactly one prescribed sample index from the train-data array.")
+    group.add_argument("--n-random", type=int, default=None,
+                       help="Visualize N randomly chosen samples from the train-data array.")
+    parser.add_argument("--rng-seed", type=int, default=0,
+                        help="Random seed used when --n-random is provided.")
+
+    parser.add_argument("--device", type=str, default="cuda",
+                        help="Device to use: 'cuda' or 'cpu'.")
+
+    args = parser.parse_args()
+
+    # Import trainer-specific pieces
+    trainer = import_trainer(args.arch)
+    CondVoxelDataset = trainer["CondVoxelDataset"]
+    GenClass = trainer["GenClass"]
+    decode_condition_overlay = trainer["decode_condition_overlay"]
+    plot_voxel_grid_3d = trainer["plot_voxel_grid_3d"]
+    unwrap_module = trainer["unwrap_module"]
+    load_checkpoint = trainer["load_checkpoint"]
+    gen_kind = trainer["gen_kind"]
+
+    os.makedirs(args.outdir, exist_ok=True)
+
+    # Device
+    if args.device == "cuda" and torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+    print(f"[sampler] device: {device}")
+
+    # Load meta
+    meta_path = resolve_meta_path(args.data_path, args.meta_path)
+    print(f"[sampler] meta path: {meta_path}")
+    meta = np.load(meta_path, allow_pickle=True)
+
+    # Load dataset
+    dataset = CondVoxelDataset(args.data_path)
+    X = dataset.X          # (N, 1, D, H, W)
+    C = dataset.C          # (N, cond_dim)
+    cond_strs = dataset.cond_strs
+    n_total = X.shape[0]
+    print(f"[sampler] total dataset samples: {n_total}")
+
+    shape3d = X.shape[2:]
+    cond_dim = C.shape[1]
+    print(f"[sampler] shape3d={shape3d}, cond_dim={cond_dim}")
+
+    # Build generator
+    if args.arch == "nonunet":
+        netG = GenClass(args.nz, args.ngf, shape3d, cond_dim)
+    else:  # unet
+        netG = GenClass(args.nz, args.ngf, shape3d, cond_dim, cond_channels=8)
+
+    # Dummy discriminator + optimizers to satisfy load_checkpoint API
+    # (weights for D/opt don't matter for sampling).
+    netD = torch.nn.Identity()
+    D_opt = torch.optim.Adam(netG.parameters(), lr=1e-4)
+    G_opt = torch.optim.Adam(netG.parameters(), lr=1e-4)
+
+    # Move to device and maybe DataParallel if user wants to reuse multi-GPU;
+    # for simple sampling, single device is fine.
+    netG = netG.to(device)
+    # Load checkpoint
+    print(f"[sampler] loading checkpoint: {args.checkpoint_path}")
+    netG, _, G_opt, _, step = load_checkpoint(
+        args.checkpoint_path, netG, netD, G_opt, D_opt, device
+    )
+    print(f"[sampler] checkpoint step: {step}")
+
+    # Prepare index selection
+    selected_indices, selection_meta = select_indices(
+        n_total, args.sample_idx, args.n_random, args.rng_seed
+    )
+    print(f"[sampler] selected sample indices: {selected_indices}")
+
+    # Try to get conditioning_spec for mode tags
+    if "conditioning_spec_json" in meta:
+        conditioning_spec = json.loads(str(meta["conditioning_spec_json"]))
+    elif "conditioning_spec" in meta:
+        conditioning_spec = meta["conditioning_spec"].item()
+    else:
+        conditioning_spec = {
+            "bc_locations": str(meta["bc_locations_mode"]) if "bc_locations_mode" in meta else "unknown",
+            "bc_dofs": str(meta["bc_dofs_mode"]) if "bc_dofs_mode" in meta else "unknown",
+            "load_location": str(meta["load_location_mode"]) if "load_location_mode" in meta else "unknown",
+            "load_direction": str(meta["load_direction_mode"]) if "load_direction_mode" in meta else "unknown",
+        }
+
+    # Run summary
+    run_summary = {
+        "arch": args.arch,
+        "gen_kind": gen_kind,
+        "data_path": args.data_path,
+        "meta_path": meta_path,
+        "checkpoint_path": args.checkpoint_path,
+        "n_per_condition": int(args.n_per_cond),
+        "selection": {
+            **selection_meta,
+            "requested_sample_idx": args.sample_idx,
+            "requested_n_random": args.n_random,
+            "selected_sample_indices": [int(i) for i in selected_indices],
+            "num_selected": len(selected_indices),
+        },
+        "dataset_metadata": {
+            "cond_dim": int(cond_dim),
+            "conditioning_spec": conditioning_spec,
+            "shape3d": list(shape3d),
+        },
+        "parts": [],
+    }
+
+    # Switch generator to eval
+    G_raw = unwrap_module(netG)
+    G_raw.eval()
+
+    with torch.no_grad():
+        for i_idx, sample_idx in enumerate(selected_indices):
+            # Fetch train sample
+            voxel_arr = X[sample_idx].cpu().numpy()[0]  # (D,H,W)
+            cond_vec = C[sample_idx].cpu().numpy()
+            cond_str = cond_strs[int(sample_idx)]
+
+            # Decode BC/load overlay from condition vector
+            overlay = decode_condition_overlay(cond_vec, meta)
+            bc_points = overlay["bc_points"]
+            load_point = overlay["load_point"]
+            load_dir = overlay["load_dir"]
+            spec = overlay["conditioning_spec"]
+            mode_tag = (
+                f"bcLoc={spec.get('bc_locations')} "
+                f"loadLoc={spec.get('load_location')} "
+                f"loadDir={spec.get('load_direction')}"
+            )
+
+            # Generate ensemble for this condition
+            n_fake = int(args.n_per_cond)
+            z = torch.randn(n_fake, args.nz, device=device)
+            c_vis = (
+                torch.tensor(cond_vec, dtype=torch.float32, device=device)
+                .unsqueeze(0)
+                .expand(n_fake, -1)
+            )
+            fake = G_raw(z, c_vis).cpu().numpy()   # (n_fake, 1, D, H, W)
+
+            fake_raw = fake[:, 0]                          # (n_fake, D, H, W)
+            fake_bin = (fake_raw > 0.0).astype(np.float32)
+
+            base_prefix = f"sample_{args.arch}_idx{sample_idx:05d}"
+            fake_raw_npy = os.path.join(args.outdir, f"{base_prefix}_fake_raw.npy")
+            fake_bin_npy = os.path.join(args.outdir, f"{base_prefix}_fake_bin.npy")
+            np.save(fake_raw_npy, fake_raw)
+            np.save(fake_bin_npy, fake_bin)
+            # Plot train voxel
+            train_png = os.path.join(args.outdir, f"{base_prefix}_train.png")
+            plot_voxel_grid_3d(
+                voxel_arr,
+                title=f"TRAIN sample idx={sample_idx} | {mode_tag}",
+                save_path=train_png,
+                bc_points=bc_points,
+                load_point=load_point,
+                load_vec=load_dir,
+            )
+
+            fake_pngs = []
+            for k in range(n_fake):
+                fake_png = os.path.join(args.outdir, f"{base_prefix}_fake{k:02d}.png")
+                plot_voxel_grid_3d(
+                    fake_raw[k],
+                    title=f"FAKE k={k} | idx={sample_idx} | {mode_tag}",
+                    save_path=fake_png,
+                    bc_points=bc_points,
+                    load_point=load_point,
+                    load_vec=load_dir,
+                )
+                fake_pngs.append(os.path.basename(fake_png))
+
+            part_record = {
+                "sample_array_index": int(sample_idx),
+                "cond_dim": int(cond_dim),
+                "cond_str": cond_str,
+                "cond_vector": cond_vec.tolist(),
+                "conditioning_spec": spec,
+                "mode_tag": mode_tag,
+                "train_plot_png": os.path.basename(train_png),
+                "n_per_condition": int(n_fake),
+                "fake_plot_pngs": fake_pngs,
+                "fake_raw_npy": os.path.basename(fake_raw_npy),
+                "fake_bin_npy": os.path.basename(fake_bin_npy),
+                "bc_points": bc_points.tolist() if bc_points is not None else None,
+                "load_point": load_point.tolist() if load_point is not None else None,
+                "load_dir": load_dir.tolist() if load_dir is not None else None,
+            }
+
+            run_summary["parts"].append(part_record)
+
+    summary_json = os.path.join(args.outdir, "sampler_run_summary.json")
+    with open(summary_json, "w") as f:
+        json.dump(run_summary, f, indent=2)
+
+    print(f"[sampler] saved run summary to {summary_json}")
+
+
+if __name__ == "__main__":
+    main()

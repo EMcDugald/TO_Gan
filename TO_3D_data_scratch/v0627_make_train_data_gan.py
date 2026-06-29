@@ -1,0 +1,66 @@
+import argparse
+import os
+import numpy as np
+
+from v0627_cond_data_utils import (
+    TARGET_SHAPE,
+    N_SPATIAL_BINS,
+    parse_conditioning_spec,
+    generate_dataset_common,
+    save_dataset_and_meta,
+)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate GAN training data with condition vector separate from mass label."
+    )
+    parser.add_argument("--data-root", type=str, default="./data")
+    parser.add_argument("--outdir", type=str, required=True)
+    parser.add_argument("--shape", type=int, nargs=3, default=list(TARGET_SHAPE))
+    parser.add_argument("--n-samples", type=int, default=10000)
+    parser.add_argument("--conditioning-spec", type=str,
+                        default="bc_locations=coarse,bc_dofs=omit,load_location=coarse,load_direction=omit")
+    parser.add_argument("--n-spatial-bins", type=int, default=N_SPATIAL_BINS)
+    parser.add_argument("--positive-if", type=str, choices=["low_mass", "high_mass"], default="low_mass")
+    parser.add_argument("--rng-seed", type=int, default=0)
+    parser.add_argument("--mass-quantile", type=float, default=None)
+    args = parser.parse_args()
+
+    topo = np.load(os.path.join(args.data_root, "topologies.npy"), allow_pickle=True)
+    shapes = np.load(os.path.join(args.data_root, "shapes.npy"), allow_pickle=True)
+    bcs = np.load(os.path.join(args.data_root, "boundary_conditions.npy"), allow_pickle=True)
+    loads = np.load(os.path.join(args.data_root, "loads.npy"), allow_pickle=True)
+
+    conditioning_spec = parse_conditioning_spec(args.conditioning_spec)
+
+    payload = generate_dataset_common(
+        shape_tuple=tuple(args.shape),
+        n_samples=args.n_samples,
+        topo=topo,
+        shapes=shapes,
+        bcs=bcs,
+        loads=loads,
+        outdir=args.outdir,
+        conditioning_spec=conditioning_spec,
+        positive_if=args.positive_if,
+        rng_seed=args.rng_seed,
+        mass_quantile=args.mass_quantile,
+        n_spatial_bins=args.n_spatial_bins,
+        label_mode="separate_label",
+    )
+
+    save_dataset_and_meta(
+        payload=payload,
+        outdir=args.outdir,
+        shape_tuple=tuple(args.shape),
+        positive_if=args.positive_if,
+        rng_seed=args.rng_seed,
+        mass_quantile=args.mass_quantile,
+        n_spatial_bins=args.n_spatial_bins,
+        file_prefix="gan_labeled_voxels",
+    )
+
+
+if __name__ == "__main__":
+    main()
