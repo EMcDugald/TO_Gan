@@ -59,8 +59,12 @@ def load_metrics(checkpoint_dir):
         'P_pos_fake_D',    # P(class=1 | fake, D)
         'P_pos_fake_G',    # P(class=1 | fake, G)
     ]
+    mass_cols = [
+        'mean_fake_mass',        # mean mass fraction of fake batch
+        'P_mass_positive_fake',  # % of fake batch labeled positive under train cutoff
+    ]
 
-    for col in base_cols + prob_cols:
+    for col in base_cols + prob_cols + mass_cols:
         if col not in df.columns:
             df[col] = np.nan
         else:
@@ -278,6 +282,72 @@ def plot_single_run(df, checkpoint_dir, meta, rolling=0):
         out_path3 = os.path.join(checkpoint_dir, 'training_metrics_probs.png')
         fig3.savefig(out_path3, dpi=300, bbox_inches='tight')
         plt.close(fig3)
+
+    # ---- Figure 4: mass diagnostics (new) ----
+    has_mass_cols = (
+        ('mean_fake_mass' in df.columns and not df['mean_fake_mass'].isna().all()) or
+        ('P_mass_positive_fake' in df.columns and not df['P_mass_positive_fake'].isna().all())
+    )
+
+    if has_mass_cols:
+        # Use epoch as x-axis for smoother view; step would also work
+        x = df['epoch']
+        mass_rolling = rolling if rolling and rolling > 1 else 25
+
+        fig4, ax4 = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+        fig4.suptitle(f'GAN Mass Diagnostics: {title_suffix}', fontsize=14)
+
+        # Panel 1: mean fake mass fraction vs epoch
+        ax = ax4[0]
+        if 'mean_fake_mass' in df.columns and not df['mean_fake_mass'].isna().all():
+            ax.plot(
+                x,
+                df['mean_fake_mass'],
+                color='tab:blue',
+                alpha=0.15,
+                linewidth=1.0,
+                label='mean_fake_mass raw',
+            )
+            ax.plot(
+                x,
+                maybe_smooth(df['mean_fake_mass'], mass_rolling),
+                color='black',
+                linewidth=2.0,
+                label=f'mean_fake_mass smooth ({mass_rolling})',
+            )
+        ax.set_ylabel('Mean fake mass fraction')
+        ax.set_title('Mean fake mass fraction vs epoch')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper right', fontsize=8)
+
+        # Panel 2: % of fake samples considered positive vs epoch
+        ax = ax4[1]
+        if 'P_mass_positive_fake' in df.columns and not df['P_mass_positive_fake'].isna().all():
+            ax.plot(
+                x,
+                df['P_mass_positive_fake'],
+                color='tab:green',
+                alpha=0.2,
+                linewidth=1.0,
+                label='P_mass_positive_fake raw',
+            )
+            ax.plot(
+                x,
+                maybe_smooth(df['P_mass_positive_fake'], mass_rolling),
+                color='tab:orange',
+                linewidth=2.0,
+                label=f'smoothed ({mass_rolling})',
+            )
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Positive rate (%)')
+        ax.set_title('Mass-labeled positive rate vs epoch')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper right', fontsize=8)
+
+        out_path4 = os.path.join(checkpoint_dir, 'training_metrics_mass.png')
+        save_plot(fig4, out_path4)
+
+
 
 
 def plot_overlay(runs, overlay_name='training_metrics_overlay.png', rolling=0):

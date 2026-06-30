@@ -6,3 +6,5 @@
 
 4) check label logic in plots- is it the labels we want to see? what would be more informative?
 
+5) make better notion of "best" for checkpoint saving
+

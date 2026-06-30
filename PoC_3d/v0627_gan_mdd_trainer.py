@@ -77,6 +77,41 @@ def mass_fraction_batch(batch_np):
     return v.mean(axis=(1, 2, 3))
 
 
+def summarize_fake_mass_from_bin(batch_bin_np, meta):
+    """
+    batch_bin_np: numpy array of shape (B, D, H, W) with values 0/1.
+    meta: np.load(..., allow_pickle=True) result (the full meta npz).
+
+    Uses get_mass_meta(meta) to interpret mass_cutoff_value and positive_if.
+    """
+    batch_bin_np = np.asarray(batch_bin_np, dtype=np.float64)
+    if batch_bin_np.ndim != 4:
+        raise ValueError(f"Expected batch_bin_np shape (B,D,H,W), got {batch_bin_np.shape}")
+
+    mass_fractions = batch_bin_np.mean(axis=(1, 2, 3))
+
+    # Use your existing helper to read cutoff / positive_if
+    mass_info = get_mass_meta(meta)
+    cutoff = mass_info["mass_cutoff_value"]
+    positive_if = mass_info["positive_if"]
+
+    if positive_if in ("low_mass", "lowmass"):
+        is_positive = mass_fractions <= cutoff
+    elif positive_if in ("high_mass", "highmass"):
+        is_positive = mass_fractions >= cutoff
+    else:
+        raise ValueError(f"Unexpected positive_if in meta: {positive_if}")
+
+    return {
+        "mass_fractions": mass_fractions,
+        "cutoff": cutoff,
+        "positive_if": positive_if,
+        "is_positive": is_positive,
+        "positive_rate_percent": float(is_positive.mean() * 100.0),
+        "mean_mass": float(mass_fractions.mean()),
+    }
+
+
 def diversity_loss(x):
     r = torch.sum(x ** 2, dim=1, keepdim=True)
     D = r - 2 * torch.matmul(x, x.T) + r.T
@@ -397,6 +432,7 @@ def GAN_step_MDD_3d_cond_3class(
     smooth_real=0.1,
     d_update=True, use_label_smoothing=True,
     use_diversity_loss=False,
+    meta=None,
 ):
     criterion = nn.CrossEntropyLoss()
 
@@ -476,6 +512,18 @@ def GAN_step_MDD_3d_cond_3class(
     G_grad_norm = G_grad_norm ** 0.5
     G_opt.step()
 
+    # Mass statistics for this fake batch
+    mean_fake_mass = float('nan')
+    mass_positive_rate = float('nan')
+
+    if meta is not None:
+        # fake_data: (B, 1, D, H, W)
+        fake_np = fake_data.detach().cpu().numpy()
+        fake_bin_np = (fake_np[:, 0] > 0.0).astype(np.float64)  # (B, D, H, W)
+        mass_summary = summarize_fake_mass_from_bin(fake_bin_np, meta)
+        mean_fake_mass = mass_summary["mean_mass"]
+        mass_positive_rate = mass_summary["positive_rate_percent"]
+
     report = {
         'L_D_real': float(L_D_real.item()),
         'L_D_neg': float(L_D_neg.item()),
@@ -488,6 +536,8 @@ def GAN_step_MDD_3d_cond_3class(
         'P_fake_fake_D': float(prob_fake_for_D[:, 0].mean().item()),
         'P_pos_fake_D': float(prob_fake_for_D[:, 1].mean().item()),
         'P_pos_fake_G': float(prob_fake_for_G[:, 1].mean().item()),
+        'mean_fake_mass': float(mean_fake_mass),
+        'P_mass_positive_fake': float(mass_positive_rate),
     }
     if L_div is not None:
         report['L_div'] = float(L_div.item())
@@ -524,7 +574,8 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                 'L_D_real', 'L_D_neg', 'L_D_fake', 'L_G',
                 'D_grad_norm', 'G_grad_norm', 'L_div',
                 'P_pos_real_pos', 'P_neg_real_neg',
-                'P_fake_fake_D', 'P_pos_fake_D', 'P_pos_fake_G'
+                'P_fake_fake_D', 'P_pos_fake_D', 'P_pos_fake_G',
+                'mean_fake_mass', 'P_mass_positive_fake',
             ])
 
     steps_range = trange(start_step, num_steps, position=0, leave=True)
@@ -546,6 +597,7 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
             d_update=d_update,
             use_label_smoothing=use_label_smoothing,
             use_diversity_loss=use_diversity_loss,
+            meta=meta,
         )
 
         steps_range.set_postfix({k: f"{v:.4f}" for k, v in report.items() if isinstance(v, float)})
@@ -566,6 +618,8 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                 report.get('P_fake_fake_D', float('nan')),
                 report.get('P_pos_fake_D', float('nan')),
                 report.get('P_pos_fake_G', float('nan')),
+                report.get('mean_fake_mass', float('nan')),
+                report.get('P_mass_positive_fake', float('nan')),
             ])
 
         current_G_loss = report.get('L_G', None)
@@ -598,6 +652,9 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                 fake = G_raw(z, c_vis).cpu().numpy()
                 cond_np = c_vis.cpu().numpy()
                 cond_strs_vis = [cond_strs[int(i)] for i in idx_vis.cpu().numpy()]
+                # Mass summary for this periodic fake batch
+                fake_bin = (fake[:, 0] > 0.0).astype(np.float64)  # (n_vis_samples, D, H, W)
+                mass_summary = summarize_fake_mass_from_bin(fake_bin, meta)
 
             np.save(os.path.join(samples_subdir, 'fake_conditions.npy'), cond_np)
             np.save(os.path.join(samples_subdir, 'fake_indices.npy'), idx_vis.cpu().numpy())
@@ -630,6 +687,26 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                     )
                     cond_str_num = ' '.join(f'{v:.6f}' for v in cond_np[i])
                     f_txt.write(f'{i:03d}  {filename}  {cond_str_num}  {cond_strs_vis[i]}\n')
+
+            # Save per-epoch mass summary as JSON
+            mass_json_path = os.path.join(
+                samples_subdir,
+                f'fake_mass_summary_epoch_{current_epoch:04d}_step_{step+1:08d}.json'
+            )
+            with open(mass_json_path, 'w') as f_mass:
+                json.dump({
+                    'epoch': int(current_epoch),
+                    'step': int(step + 1),
+                    'n_vis_samples': int(n_vis_samples),
+                    'mass_cutoff_value': float(mass_summary['cutoff']),
+                    'positive_if': mass_summary['positive_if'],
+                    'mean_mass': float(mass_summary['mean_mass']),
+                    'positive_rate_percent': float(mass_summary['positive_rate_percent']),
+                    'mass_fractions': mass_summary['mass_fractions'].tolist(),
+                    'is_positive': mass_summary['is_positive'].tolist(),
+                    'sample_indices': idx_vis.cpu().numpy().tolist(),
+                }, f_mass, indent=2)
+                
             G_raw.train()
 
     if checkpoint_dir is not None:

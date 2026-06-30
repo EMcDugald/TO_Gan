@@ -29,15 +29,14 @@ UNET_TRAINER_MODULE = "v0627_gan_mdd_unet_trainer"
 
 def import_trainer(arch):
     """
-    Import CondVoxelDataset, generator, decode_condition_overlay, plot_voxel_grid_3d,
-    unwrap_module, load_checkpoint from the appropriate trainer module.
-
-    arch: "nonunet" or "unet"
+    Import dataset, G, D, plotting helpers, and load_checkpoint
+    from the appropriate trainer module.
     """
     if arch == "nonunet":
         mod = __import__(NONUNET_TRAINER_MODULE, fromlist=[
             "CondVoxelDataset",
             "CondGenerator3d",
+            "CondDiscriminator3d",
             "decode_condition_overlay",
             "plot_voxel_grid_3d",
             "unwrap_module",
@@ -45,17 +44,19 @@ def import_trainer(arch):
         ])
         CondVoxelDataset = mod.CondVoxelDataset
         GenClass = mod.CondGenerator3d
+        DiscClass = mod.CondDiscriminator3d
         decode_condition_overlay = mod.decode_condition_overlay
         plot_voxel_grid_3d = mod.plot_voxel_grid_3d
         unwrap_module = mod.unwrap_module
         load_checkpoint = mod.load_checkpoint
-
         gen_kind = "CondGenerator3d"
+        disc_kind = "CondDiscriminator3d"
 
     elif arch == "unet":
         mod = __import__(UNET_TRAINER_MODULE, fromlist=[
             "CondVoxelDataset",
             "CondUNetGenerator3D",
+            "CondDiscriminator3DImproved",
             "decode_condition_overlay",
             "plot_voxel_grid_3d",
             "unwrap_module",
@@ -63,12 +64,13 @@ def import_trainer(arch):
         ])
         CondVoxelDataset = mod.CondVoxelDataset
         GenClass = mod.CondUNetGenerator3D
+        DiscClass = mod.CondDiscriminator3DImproved
         decode_condition_overlay = mod.decode_condition_overlay
         plot_voxel_grid_3d = mod.plot_voxel_grid_3d
         unwrap_module = mod.unwrap_module
         load_checkpoint = mod.load_checkpoint
-
         gen_kind = "CondUNetGenerator3D"
+        disc_kind = "CondDiscriminator3DImproved"
 
     else:
         raise ValueError(f"Unsupported arch {arch!r}; expected 'nonunet' or 'unet'")
@@ -76,11 +78,13 @@ def import_trainer(arch):
     return {
         "CondVoxelDataset": CondVoxelDataset,
         "GenClass": GenClass,
+        "DiscClass": DiscClass,
         "decode_condition_overlay": decode_condition_overlay,
         "plot_voxel_grid_3d": plot_voxel_grid_3d,
         "unwrap_module": unwrap_module,
         "load_checkpoint": load_checkpoint,
         "gen_kind": gen_kind,
+        "disc_kind": disc_kind,
     }
 
 
@@ -112,6 +116,76 @@ def select_indices(n_total, sample_idx, n_random, rng_seed):
     rng = np.random.default_rng(rng_seed)
     picks = sorted(rng.choice(n_total, size=n_pick, replace=False).tolist())
     return picks, {"selection_mode": "random", "rng_seed": int(rng_seed)}
+
+
+def get_mass_meta(meta):
+    if "mass_cutoff_value" not in meta:
+        return None
+
+    if "conditioning_spec_json" in meta:
+        conditioning_spec = json.loads(str(meta["conditioning_spec_json"]))
+        conditioning_mode = str(conditioning_spec.get("bc_locations", "unknown"))
+    elif "conditioning_spec_str" in meta:
+        conditioning_mode = str(meta["conditioning_spec_str"])
+    elif "conditioning_mode" in meta:
+        conditioning_mode = str(meta["conditioning_mode"])
+    else:
+        conditioning_mode = "unknown"
+
+    mass_quantile = None
+    if "mass_quantile" in meta:
+        try:
+            mq = float(meta["mass_quantile"])
+            if not np.isnan(mq):
+                mass_quantile = mq
+        except Exception:
+            mass_quantile = None
+
+    return {
+        "mass_cutoff_value": float(meta["mass_cutoff_value"]),
+        "mass_cutoff_method": str(meta["mass_cutoff_method"]) if "mass_cutoff_method" in meta else "unknown",
+        "positive_if": str(meta["positive_if"]) if "positive_if" in meta else "unknown",
+        "conditioning_mode": conditioning_mode,
+        "label_mode": str(meta["label_mode"]) if "label_mode" in meta else "unknown",
+        "mass_quantile": mass_quantile,
+        "mass_threshold_source": str(meta["mass_threshold_source"]) if "mass_threshold_source" in meta else "unknown",
+    }
+
+
+def summarize_fake_mass_from_bin(batch_bin_np, meta):
+    """
+    batch_bin_np: numpy array of shape (B, D, H, W) with values 0/1
+    Returns None if mass metadata is unavailable.
+    """
+    batch_bin_np = np.asarray(batch_bin_np, dtype=np.float64)
+    if batch_bin_np.ndim != 4:
+        raise ValueError(f"Expected batch_bin_np shape (B,D,H,W), got {batch_bin_np.shape}")
+
+    mass_info = get_mass_meta(meta)
+    if mass_info is None:
+        return None
+
+    mass_fractions = batch_bin_np.mean(axis=(1, 2, 3))
+    cutoff = mass_info["mass_cutoff_value"]
+    positive_if = mass_info["positive_if"]
+
+    if positive_if in ("low_mass", "lowmass"):
+        is_positive = mass_fractions <= cutoff
+    elif positive_if in ("high_mass", "highmass"):
+        is_positive = mass_fractions >= cutoff
+    else:
+        is_positive = None
+
+    return {
+        "mass_fractions": mass_fractions,
+        "cutoff": cutoff,
+        "positive_if": positive_if,
+        "is_positive": None if is_positive is None else is_positive,
+        "positive_rate_percent": None if is_positive is None else float(is_positive.mean() * 100.0),
+        "mean_mass": float(mass_fractions.mean()),
+        "min_mass": float(mass_fractions.min()),
+        "max_mass": float(mass_fractions.max()),
+    }
 
 
 # -------------------------------------------------------------------------
@@ -213,6 +287,8 @@ def main():
                         help="Noise dimension (must match the trainer used for the checkpoint).")
     parser.add_argument("--ngf", type=int, required=True,
                         help="Base channel count in G (ngf at training time).")
+    parser.add_argument("--ndf", type=int, required=True,
+                    help="Base channel count in D (must match training checkpoint).")
     parser.add_argument("--n-per-cond", type=int, default=4,
                         help="Number of generated samples to draw per selected condition.")
 
@@ -233,11 +309,13 @@ def main():
     trainer = import_trainer(args.arch)
     CondVoxelDataset = trainer["CondVoxelDataset"]
     GenClass = trainer["GenClass"]
+    DiscClass = trainer["DiscClass"]
     decode_condition_overlay = trainer["decode_condition_overlay"]
     plot_voxel_grid_3d = trainer["plot_voxel_grid_3d"]
     unwrap_module = trainer["unwrap_module"]
     load_checkpoint = trainer["load_checkpoint"]
     gen_kind = trainer["gen_kind"]
+    disc_kind = trainer["disc_kind"]
 
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -252,6 +330,7 @@ def main():
     meta_path = resolve_meta_path(args.data_path, args.meta_path)
     print(f"[sampler] meta path: {meta_path}")
     meta = np.load(meta_path, allow_pickle=True)
+    mass_info = get_mass_meta(meta)
 
     # Load dataset
     dataset = CondVoxelDataset(args.data_path)
@@ -271,15 +350,20 @@ def main():
     else:  # unet
         netG = GenClass(args.nz, args.ngf, shape3d, cond_dim, cond_channels=8)
 
-    # Dummy discriminator + optimizers to satisfy load_checkpoint API
-    # (weights for D/opt don't matter for sampling).
-    netD = torch.nn.Identity()
-    D_opt = torch.optim.Adam(netG.parameters(), lr=1e-4)
-    G_opt = torch.optim.Adam(netG.parameters(), lr=1e-4)
+    # Build discriminator that matches the selected checkpoint architecture.
+    if args.arch == "nonunet":
+        netD = DiscClass(args.ndf, shape3d, cond_dim, nc=3)
+    else:  # unet
+        netD = DiscClass(args.ndf, shape3d, cond_dim, cond_channels=8, nc=3)
+
+    # Optimizers are needed because load_checkpoint() also restores optimizer state.
+    D_opt = torch.optim.Adam(netD.parameters(), lr=1e-4, betas=(0.5, 0.999))
+    G_opt = torch.optim.Adam(netG.parameters(), lr=1e-4, betas=(0.5, 0.999))
 
     # Move to device and maybe DataParallel if user wants to reuse multi-GPU;
     # for simple sampling, single device is fine.
     netG = netG.to(device)
+    netD = netD.to(device)
     # Load checkpoint
     print(f"[sampler] loading checkpoint: {args.checkpoint_path}")
     netG, _, G_opt, _, step = load_checkpoint(
@@ -325,6 +409,7 @@ def main():
             "cond_dim": int(cond_dim),
             "conditioning_spec": conditioning_spec,
             "shape3d": list(shape3d),
+            "mass_info": mass_info,
         },
         "parts": [],
     }
@@ -364,6 +449,7 @@ def main():
 
             fake_raw = fake[:, 0]                          # (n_fake, D, H, W)
             fake_bin = (fake_raw > 0.0).astype(np.float32)
+            fake_mass_summary = summarize_fake_mass_from_bin(fake_bin, meta)
 
             base_prefix = f"sample_{args.arch}_idx{sample_idx:05d}"
             fake_raw_npy = os.path.join(args.outdir, f"{base_prefix}_fake_raw.npy")
@@ -384,15 +470,23 @@ def main():
             fake_pngs = []
             for k in range(n_fake):
                 fake_png = os.path.join(args.outdir, f"{base_prefix}_fake{k:02d}.png")
+
+                mass_tag = ""
+                if fake_mass_summary is not None:
+                    mf = float(fake_mass_summary["mass_fractions"][k])
+                    mass_tag = f" | mass={mf:.4f}"
+
                 plot_voxel_grid_3d(
                     fake_raw[k],
-                    title=f"FAKE k={k} | idx={sample_idx} | {mode_tag}",
+                    title=f"FAKE k={k} | idx={sample_idx} | {mode_tag}{mass_tag}",
                     save_path=fake_png,
                     bc_points=bc_points,
                     load_point=load_point,
                     load_vec=load_dir,
                 )
                 fake_pngs.append(os.path.basename(fake_png))
+
+            part_json = os.path.join(args.outdir, f"{base_prefix}.json")
 
             part_record = {
                 "sample_array_index": int(sample_idx),
@@ -409,7 +503,31 @@ def main():
                 "bc_points": bc_points.tolist() if bc_points is not None else None,
                 "load_point": load_point.tolist() if load_point is not None else None,
                 "load_dir": load_dir.tolist() if load_dir is not None else None,
+                "mass_summary": None,
             }
+
+            if fake_mass_summary is not None:
+                part_record["mass_summary"] = {
+                    "mass_cutoff_value": float(fake_mass_summary["cutoff"]),
+                    "positive_if": fake_mass_summary["positive_if"],
+                    "mean_mass": float(fake_mass_summary["mean_mass"]),
+                    "min_mass": float(fake_mass_summary["min_mass"]),
+                    "max_mass": float(fake_mass_summary["max_mass"]),
+                    "positive_rate_percent": (
+                        None if fake_mass_summary["positive_rate_percent"] is None
+                        else float(fake_mass_summary["positive_rate_percent"])
+                    ),
+                    "mass_fractions": fake_mass_summary["mass_fractions"].tolist(),
+                    "is_positive": (
+                        None if fake_mass_summary["is_positive"] is None
+                        else fake_mass_summary["is_positive"].tolist()
+                    ),
+                }
+
+            with open(part_json, "w") as f:
+                json.dump(part_record, f, indent=2)
+
+            part_record["part_json"] = os.path.basename(part_json)
 
             run_summary["parts"].append(part_record)
 
