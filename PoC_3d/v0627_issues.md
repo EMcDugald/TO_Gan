@@ -6,5 +6,9 @@
 
 4) check label logic in plots- is it the labels we want to see? what would be more informative?
 
-5) make better notion of "best" for checkpoint saving
+5) make better notion of "best" for checkpoint saving gans
+
+6) too many saved subset indices for diffusion sampler
+
+
 

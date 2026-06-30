@@ -54,9 +54,8 @@ def import_diffusion_trainer():
 
 
 # -------------------------------------------------------------------------
-# Meta + selection utilities
+# Meta + mass utilities (mirroring GAN sampler)
 # -------------------------------------------------------------------------
-
 
 def resolve_meta_path(data_path, meta_path=None):
     if meta_path is not None:
@@ -66,45 +65,130 @@ def resolve_meta_path(data_path, meta_path=None):
     raise ValueError("Could not infer meta path; please provide --meta-path")
 
 
-def select_indices_positive_only(y, sample_idx, n_random, rng_seed):
+def get_mass_meta(meta):
+    if "mass_cutoff_value" not in meta:
+        return None
+
+    if "conditioning_spec_json" in meta:
+        conditioning_spec = json.loads(str(meta["conditioning_spec_json"]))
+        conditioning_mode = str(conditioning_spec.get("bc_locations", "unknown"))
+    elif "conditioning_spec_str" in meta:
+        conditioning_mode = str(meta["conditioning_spec_str"])
+    elif "conditioning_mode" in meta:
+        conditioning_mode = str(meta["conditioning_mode"])
+    else:
+        conditioning_mode = "unknown"
+
+    mass_quantile = None
+    if "mass_quantile" in meta:
+        try:
+            mq = float(meta["mass_quantile"])
+            if not np.isnan(mq):
+                mass_quantile = mq
+        except Exception:
+            mass_quantile = None
+
+    return {
+        "mass_cutoff_value": float(meta["mass_cutoff_value"]),
+        "mass_cutoff_method": str(meta["mass_cutoff_method"]) if "mass_cutoff_method" in meta else "unknown",
+        "positive_if": str(meta["positive_if"]) if "positive_if" in meta else "unknown",
+        "conditioning_mode": conditioning_mode,
+        "label_mode": str(meta["label_mode"]) if "label_mode" in meta else "unknown",
+        "mass_quantile": mass_quantile,
+        "mass_threshold_source": str(meta["mass_threshold_source"]) if "mass_threshold_source" in meta else "unknown",
+    }
+
+
+def summarize_fake_mass_from_bin(batch_bin_np, meta):
     """
-    Select from positive-only subset (y == 1), mirroring the trainer.
-    Either a single explicit index or n_random random positives.
+    batch_bin_np: numpy array of shape (B, D, H, W) with values 0/1
+    Returns None if mass metadata is unavailable.
+    """
+    batch_bin_np = np.asarray(batch_bin_np, dtype=np.float64)
+    if batch_bin_np.ndim != 4:
+        raise ValueError(f"Expected batch_bin_np shape (B,D,H,W), got {batch_bin_np.shape}")
+
+    mass_info = get_mass_meta(meta)
+    if mass_info is None:
+        return None
+
+    mass_fractions = batch_bin_np.mean(axis=(1, 2, 3))
+    cutoff = mass_info["mass_cutoff_value"]
+    positive_if = mass_info["positive_if"]
+
+    if positive_if in ("low_mass", "lowmass"):
+        is_positive = mass_fractions <= cutoff
+    elif positive_if in ("high_mass", "highmass"):
+        is_positive = mass_fractions >= cutoff
+    else:
+        is_positive = None
+
+    return {
+        "mass_fractions": mass_fractions,
+        "cutoff": cutoff,
+        "positive_if": positive_if,
+        "is_positive": None if is_positive is None else is_positive,
+        "positive_rate_percent": None if is_positive is None else float(is_positive.mean() * 100.0),
+        "mean_mass": float(mass_fractions.mean()),
+        "min_mass": float(mass_fractions.min()),
+        "max_mass": float(mass_fractions.max()),
+    }
+
+
+# -------------------------------------------------------------------------
+# Selection utilities (aligned with GAN, but positive-only by default)
+# -------------------------------------------------------------------------
+
+def select_indices_by_subset(y, sample_idx, n_random, rng_seed, subset="positive_only"):
+    """
+    Select reference indices from either the positive-only subset (default)
+    or the full dataset, mirroring GAN sampler behavior.
+
+    subset: "positive_only" or "all"
     """
     y = np.asarray(y, dtype=np.int64)
-    pos_indices = np.where(y == 1)[0]
-    if len(pos_indices) == 0:
-        raise ValueError("No positive (label==1) samples found in dataset")
+
+    if subset == "positive_only":
+        allowed = np.where(y == 1)[0]
+        single_mode = "single_positive"
+        random_mode = "random_positive"
+    elif subset == "all":
+        allowed = np.arange(len(y))
+        single_mode = "single"
+        random_mode = "random"
+    else:
+        raise ValueError(f"Unsupported subset {subset!r}; expected 'positive_only' or 'all'")
+
+    if len(allowed) == 0:
+        raise ValueError(f"No samples available for subset={subset}")
+
+    allowed_set = set(allowed.tolist())
 
     if sample_idx is not None:
         if sample_idx < 0 or sample_idx >= len(y):
             raise ValueError(f"sample_idx {sample_idx} out of range for {len(y)} samples")
-        if y[sample_idx] != 1:
-            raise ValueError(
-                f"sample_idx {sample_idx} has label {y[sample_idx]}, "
-                "but diffusion trainer uses positive-only (label==1) subset"
-            )
+        if sample_idx not in allowed_set:
+            raise ValueError(f"sample_idx {sample_idx} is not in subset={subset}")
         selected = [int(sample_idx)]
-        meta = {"selection_mode": "single_positive", "rng_seed": None}
-        return selected, meta, pos_indices.tolist()
+        meta = {"selection_mode": single_mode, "rng_seed": None}
+        return selected, meta, allowed.tolist()
 
     if n_random is None or n_random <= 0:
         raise ValueError("When --sample-idx is not used, --n-random must be positive")
 
-    n_pick = min(int(n_random), len(pos_indices))
+    n_pick = min(int(n_random), len(allowed))
     rng = np.random.default_rng(rng_seed)
-    picks = sorted(rng.choice(pos_indices, size=n_pick, replace=False).tolist())
+    picks = sorted(rng.choice(allowed, size=n_pick, replace=False).tolist())
     meta = {
-        "selection_mode": "random_positive",
+        "selection_mode": random_mode,
         "rng_seed": int(rng_seed),
     }
-    return picks, meta, pos_indices.tolist()
+    return picks, meta, allowed.tolist()
 
 
 # -------------------------------------------------------------------------
 # Core sampling routine
 # -------------------------------------------------------------------------
-
 
 def run_diffusion_sampler(
     data_path,
@@ -126,6 +210,7 @@ def run_diffusion_sampler(
     n_random,
     n_per_cond,
     rng_seed,
+    subset,
     device_str,
 ):
     trainer = import_diffusion_trainer()
@@ -164,7 +249,7 @@ def run_diffusion_sampler(
     mp_std = functools.partial(marginal_prob_std_fn, bmin=0.1, bmax=20.0)
     drift = functools.partial(drift_coeff_fn, bmin=0.1, bmax=20.0)
 
-    # Construct score model
+    # Construct score model (must match trainer hparams)
     score_model = ScoreNet3DVoxelCond(
         in_ch=1,
         cond_dim=cond_dim,
@@ -178,20 +263,20 @@ def run_diffusion_sampler(
         marginal_prob_std=mp_std,
     ).to(device)
 
-    # Load checkpoint (state_dict)
+    # Load checkpoint (state_dict, as in trainer)
     print(f"[diffusion-sampler] loading checkpoint: {checkpoint_path}")
     state = torch.load(checkpoint_path, map_location=device)
     score_model.load_state_dict(state)
     score_model.eval()
 
-    # Positive-only selection
-    selected_indices, selection_meta, pos_indices_full = select_indices_positive_only(
-        y, sample_idx, n_random, rng_seed
+    # Selection (positive-only by default, but can be 'all')
+    selected_indices, selection_meta, subset_indices_full = select_indices_by_subset(
+        y, sample_idx, n_random, rng_seed, subset=subset
     )
-    print(f"[diffusion-sampler] selected positive indices: {selected_indices}")
-    print(f"[diffusion-sampler] positive subset size: {len(pos_indices_full)}")
+    print(f"[diffusion-sampler] selected indices (subset={subset}): {selected_indices}")
+    print(f"[diffusion-sampler] subset size: {len(subset_indices_full)}")
 
-    # Conditioning spec + label_mode
+    # Conditioning spec + label_mode (same logic as trainer)
     if "conditioning_spec_json" in meta:
         conditioning_spec = json.loads(str(meta["conditioning_spec_json"]))
     elif "conditioning_spec" in meta:
@@ -205,25 +290,29 @@ def run_diffusion_sampler(
         }
 
     label_mode = str(meta["label_mode"]) if "label_mode" in meta else "unknown"
+    mass_info = get_mass_meta(meta)
 
-    # Run summary
+    # Run summary (aligned with GAN sampler schema)
     run_summary = {
         "arch": "diffusion_vpsde",
         "data_path": data_path,
         "meta_path": meta_path,
         "checkpoint_path": checkpoint_path,
-        "img_size": int(img_size),
-        "cond_dim": int(cond_dim),
-        "conditioning_spec": conditioning_spec,
-        "label_mode": label_mode,
         "selection": {
             **selection_meta,
             "requested_sample_idx": sample_idx,
             "requested_n_random": n_random,
             "selected_sample_indices": [int(i) for i in selected_indices],
             "num_selected": len(selected_indices),
-            "positive_subset_indices": pos_indices_full,
-            "subset_type": "positive_only",
+            "subset_type": subset,
+            "subset_indices": subset_indices_full,
+        },
+        "dataset_metadata": {
+            "cond_dim": int(cond_dim),
+            "conditioning_spec": conditioning_spec,
+            "shape3d": [int(img_size), int(img_size), int(img_size)],
+            "label_mode": label_mode,
+            "mass_info": mass_info,
         },
         "sampler_config": {
             "mode": mode,
@@ -231,6 +320,7 @@ def run_diffusion_sampler(
             "atol": float(sample_atol),
             "rtol": float(sample_rtol),
             "eps": float(sample_eps),
+            "img_size": int(img_size),
             "unet_ch1_dim": int(unet_ch1_dim),
             "unet_ch2_dim": int(unet_ch2_dim),
             "unet_ch3_dim": int(unet_ch3_dim),
@@ -267,8 +357,8 @@ def run_diffusion_sampler(
 
             base_prefix = f"sample_diffusion_idx{sample_idx:05d}"
 
-            # Save reference train voxel (binary overlay; convert from [-1,1] back to mask)
-            voxel_np = voxel_arr.cpu().numpy()[0]      # (D,H,W)
+            # Save reference train voxel (binary mask from [-1,1] field)
+            voxel_np = voxel_arr[0]           # (D,H,W), numpy
             train_bin = (voxel_np > 0.0).astype(np.float32)
             train_png = os.path.join(outdir, f"{base_prefix}_train.png")
             plot_voxel_with_conditions(
@@ -282,7 +372,12 @@ def run_diffusion_sampler(
 
             # Build batch condition: repeat same cond_vec n_per_cond times
             n_fake = int(n_per_cond)
-            cond_batch = torch.from_numpy(cond_vec.astype(np.float32)).to(device).unsqueeze(0).expand(n_fake, -1)
+            cond_batch = (
+                torch.from_numpy(cond_vec.astype(np.float32))
+                .to(device)
+                .unsqueeze(0)
+                .expand(n_fake, -1)
+            )
 
             # ODE sampler call
             x_shape = torch.Size([n_fake, 1, img_size, img_size, img_size])
@@ -307,6 +402,9 @@ def run_diffusion_sampler(
             fake_raw = x_samples[:, 0]                 # (n_fake,D,H,W)
             fake_bin = x_bin[:, 0]                     # (n_fake,D,H,W)
 
+            # Mass summary (GAN-style)
+            fake_mass_summary = summarize_fake_mass_from_bin(fake_bin, meta)
+
             # Save arrays
             fake_raw_npy = os.path.join(outdir, f"{base_prefix}_fake_raw.npy")
             fake_bin_npy = os.path.join(outdir, f"{base_prefix}_fake_bin.npy")
@@ -319,16 +417,23 @@ def run_diffusion_sampler(
             fake_pngs = []
             for k in range(n_fake):
                 fake_png = os.path.join(outdir, f"{base_prefix}_fake{k:02d}.png")
+
+                mass_tag = ""
+                if fake_mass_summary is not None:
+                    mf = float(fake_mass_summary["mass_fractions"][k])
+                    mass_tag = f" | mass={mf:.4f}"
+
                 plot_voxel_with_conditions(
                     fake_bin[k],
                     save_path=fake_png,
-                    title=f"DIFFUSION FAKE k={k} | idx={sample_idx} | {mode_tag}",
+                    title=f"DIFFUSION FAKE k={k} | idx={sample_idx} | {mode_tag}{mass_tag}",
                     bc_points=bc_points,
                     load_point=load_point,
                     load_vec=load_dir,
                 )
                 fake_pngs.append(os.path.basename(fake_png))
 
+            # Part record (aligned with GAN schema, plus diffusion extras)
             part_record = {
                 "sample_array_index": int(sample_idx),
                 "label_value": label_val,
@@ -344,12 +449,29 @@ def run_diffusion_sampler(
                 "fake_raw_npy": os.path.basename(fake_raw_npy),
                 "fake_bin_npy": os.path.basename(fake_bin_npy),
                 "traj_npy": os.path.basename(traj_npy),
+                "bc_points": bc_points.tolist() if bc_points is not None else None,
+                "load_point": load_point.tolist() if load_point is not None else None,
+                "load_dir": load_dir.tolist() if load_dir is not None else None,
+                "mass_summary": None,
             }
 
-            # include BC/load overlay fields explicitly
-            part_record["bc_points"] = bc_points.tolist() if bc_points is not None else None
-            part_record["load_point"] = load_point.tolist() if load_point is not None else None
-            part_record["load_dir"] = load_dir.tolist() if load_dir is not None else None
+            if fake_mass_summary is not None:
+                part_record["mass_summary"] = {
+                    "mass_cutoff_value": float(fake_mass_summary["cutoff"]),
+                    "positive_if": fake_mass_summary["positive_if"],
+                    "mean_mass": float(fake_mass_summary["mean_mass"]),
+                    "min_mass": float(fake_mass_summary["min_mass"]),
+                    "max_mass": float(fake_mass_summary["max_mass"]),
+                    "positive_rate_percent": (
+                        None if fake_mass_summary["positive_rate_percent"] is None
+                        else float(fake_mass_summary["positive_rate_percent"])
+                    ),
+                    "mass_fractions": fake_mass_summary["mass_fractions"].tolist(),
+                    "is_positive": (
+                        None if fake_mass_summary["is_positive"] is None
+                        else fake_mass_summary["is_positive"].tolist()
+                    ),
+                }
 
             run_summary["parts"].append(part_record)
 
@@ -364,10 +486,9 @@ def run_diffusion_sampler(
 # CLI
 # -------------------------------------------------------------------------
 
-
 def main():
     parser = argparse.ArgumentParser(
-        description="Sample VPSDE diffusion checkpoints on BC/load-conditioned voxel data (positive-only conditions)."
+        description="Sample VPSDE diffusion checkpoints on BC/load-conditioned voxel data."
     )
 
     parser.add_argument("--data-path", type=str, required=True,
@@ -391,7 +512,7 @@ def main():
     parser.add_argument("--mode", type=str, default="X0",
                         help="Diffusion mode: 'X0' (only X0 supported in sampler).")
 
-    # Sampler ODE settings
+    # Sampler ODE settings (mirroring trainer defaults)
     parser.add_argument("--sample-atol", type=float, default=1e-4)
     parser.add_argument("--sample-rtol", type=float, default=1e-4)
     parser.add_argument("--sample-eps", type=float, default=1e-3)
@@ -399,13 +520,16 @@ def main():
     # Condition selection + ensemble size
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--sample-idx", type=int, default=None,
-                       help="Sample exactly one positive condition index.")
+                       help="Sample exactly one condition index.")
     group.add_argument("--n-random", type=int, default=None,
-                       help="Sample N randomly chosen positive conditions.")
+                       help="Sample N randomly chosen conditions.")
     parser.add_argument("--n-per-cond", type=int, default=4,
                         help="Number of generated samples per selected condition.")
     parser.add_argument("--rng-seed", type=int, default=0,
                         help="Random seed used when --n-random is provided.")
+
+    parser.add_argument("--subset", type=str, choices=["positive_only", "all"], default="positive_only",
+                        help="Pool used to choose reference conditions (default: positive_only).")
 
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device to use: 'cuda' or 'cpu'.")
@@ -432,6 +556,7 @@ def main():
         n_random=args.n_random,
         n_per_cond=args.n_per_cond,
         rng_seed=args.rng_seed,
+        subset=args.subset,
         device_str=args.device,
     )
 
