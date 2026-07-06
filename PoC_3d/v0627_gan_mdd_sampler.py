@@ -151,6 +151,47 @@ def get_mass_meta(meta):
         "mass_threshold_source": str(meta["mass_threshold_source"]) if "mass_threshold_source" in meta else "unknown",
     }
 
+def get_cond_slices(meta):
+    if "cond_slices_json" in meta:
+        return json.loads(str(meta["cond_slices_json"]))
+    if "cond_slices" in meta:
+        return meta["cond_slices"].item()
+    return None
+
+
+def decode_condition_fields(cond_vec, meta):
+    cond_vec = np.asarray(cond_vec, dtype=np.float64)
+    cond_slices = get_cond_slices(meta)
+    if cond_slices is None:
+        return {}
+
+    decoded = {}
+    for key in [
+        "bc_points",
+        "bc_mask",
+        "bc_count",
+        "bc_dofs",
+        "load_point",
+        "load_bins",
+        "load_dir",
+        "bc_x_range",
+        "bc_y_range",
+        "bc_z_range",
+        "bc_bins",
+    ]:
+        if key not in cond_slices:
+            continue
+
+        s, e = cond_slices[key]
+        vals = np.asarray(cond_vec[s:e])
+
+        if key == "bc_count":
+            decoded[f"cond_{key}"] = float(vals[0]) if len(vals) else None
+        else:
+            decoded[f"cond_{key}"] = vals.tolist()
+
+    return decoded
+
 
 def summarize_fake_mass_from_bin(batch_bin_np, meta):
     """
@@ -192,77 +233,6 @@ def summarize_fake_mass_from_bin(batch_bin_np, meta):
 # Core sampling routine
 # -------------------------------------------------------------------------
 
-def run_sampler(
-    arch,
-    data_path,
-    meta_path,
-    checkpoint_path,
-    outdir,
-    nz,
-    n_samples,
-    sample_idx,
-    rng_seed,
-    device_str,
-):
-    # Import trainer-specific pieces
-    trainer = import_trainer(arch)
-    CondVoxelDataset = trainer["CondVoxelDataset"]
-    GenClass = trainer["GenClass"]
-    decode_condition_overlay = trainer["decode_condition_overlay"]
-    plot_voxel_grid_3d = trainer["plot_voxel_grid_3d"]
-    unwrap_module = trainer["unwrap_module"]
-    load_checkpoint = trainer["load_checkpoint"]
-    gen_kind = trainer["gen_kind"]
-
-    os.makedirs(outdir, exist_ok=True)
-
-    # Device
-    if device_str == "cuda" and torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
-    print(f"[sampler] device: {device}")
-
-    # Load meta
-    meta_path = resolve_meta_path(data_path, meta_path)
-    print(f"[sampler] meta path: {meta_path}")
-    meta = np.load(meta_path, allow_pickle=True)
-
-    # Load dataset
-    dataset = CondVoxelDataset(data_path)
-    # dataset.X: (N, 1, D, H, W), dataset.C: (N, cond_dim)
-    X = dataset.X
-    C = dataset.C
-    cond_strs = dataset.cond_strs
-    n_total = X.shape[0]
-    print(f"[sampler] total dataset samples: {n_total}")
-
-    # Shape and cond dimension
-    shape3d = X.shape[2:]
-    cond_dim = C.shape[1]
-    print(f"[sampler] shape3d={shape3d}, cond_dim={cond_dim}")
-
-    # Instantiate generator
-    if arch == "nonunet":
-        # CondGenerator3d(nz, ngf, output_shape, cond_dim, cond_embed_dim=32)
-        # We don't strictly need ngf for sampling, but to load weights correctly we must match training.
-        # For sampling script, we require user to specify ngf to match the checkpoint.
-        raise RuntimeError(
-            "For nonunet arch, please provide ngf and re-run. "
-            "You can extend this sampler to accept --ngf similarly to nz."
-        )
-    elif arch == "unet":
-        # For UNet, we also need base_ch (ngf at training). Use nz + ngf from checkpoint naming or CLI.
-        raise RuntimeError(
-            "For unet arch, please provide ngf and re-run. "
-            "You can extend this sampler to accept --ngf similarly to nz."
-        )
-
-    # NOTE:
-    # The above RuntimeError blocks use here; see below for full version that includes --ngf.
-    # To keep this script self-contained and runnable, we add ngf as an argument and
-    # instantiate correctly for both arches.
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -288,7 +258,7 @@ def main():
     parser.add_argument("--ngf", type=int, required=True,
                         help="Base channel count in G (ngf at training time).")
     parser.add_argument("--ndf", type=int, required=True,
-                    help="Base channel count in D (must match training checkpoint).")
+                        help="Base channel count in D (must match training checkpoint).")
     parser.add_argument("--n-per-cond", type=int, default=4,
                         help="Number of generated samples to draw per selected condition.")
 
@@ -331,6 +301,7 @@ def main():
     print(f"[sampler] meta path: {meta_path}")
     meta = np.load(meta_path, allow_pickle=True)
     mass_info = get_mass_meta(meta)
+    cond_slices = get_cond_slices(meta)
 
     # Load dataset
     dataset = CondVoxelDataset(args.data_path)
@@ -366,9 +337,12 @@ def main():
     netD = netD.to(device)
     # Load checkpoint
     print(f"[sampler] loading checkpoint: {args.checkpoint_path}")
-    netG, _, G_opt, _, step = load_checkpoint(
+    # netG, _, G_opt, _, step = load_checkpoint(
+    #     args.checkpoint_path, netG, netD, G_opt, D_opt, device
+    # )
+    netG, netD, G_opt, D_opt, step = load_checkpoint(
         args.checkpoint_path, netG, netD, G_opt, D_opt, device
-    )
+        )
     print(f"[sampler] checkpoint step: {step}")
 
     # Prepare index selection
@@ -405,9 +379,17 @@ def main():
             "selected_sample_indices": [int(i) for i in selected_indices],
             "num_selected": len(selected_indices),
         },
+        # "dataset_metadata": {
+        #     "cond_dim": int(cond_dim),
+        #     "conditioning_spec": conditioning_spec,
+        #     "shape3d": list(shape3d),
+        #     "mass_info": mass_info,
+        # },
+
         "dataset_metadata": {
             "cond_dim": int(cond_dim),
             "conditioning_spec": conditioning_spec,
+            "cond_slices": cond_slices,
             "shape3d": list(shape3d),
             "mass_info": mass_info,
         },
@@ -422,7 +404,14 @@ def main():
         for i_idx, sample_idx in enumerate(selected_indices):
             # Fetch train sample
             voxel_arr = X[sample_idx].cpu().numpy()[0]  # (D,H,W)
+
+            ### Possible code change ###
             cond_vec = C[sample_idx].cpu().numpy()
+            # cond_t = C[sample_idx].to(device)          # (cond_dim,)
+            # cond_vec = cond_t.detach().cpu().numpy()   # for JSON / decode / logging
+
+
+            decoded_cond_fields = decode_condition_fields(cond_vec, meta)
             cond_str = cond_strs[int(sample_idx)]
 
             # Decode BC/load overlay from condition vector
@@ -440,11 +429,15 @@ def main():
             # Generate ensemble for this condition
             n_fake = int(args.n_per_cond)
             z = torch.randn(n_fake, args.nz, device=device)
+
+            ### Possible code change ###
             c_vis = (
                 torch.tensor(cond_vec, dtype=torch.float32, device=device)
                 .unsqueeze(0)
                 .expand(n_fake, -1)
             )
+            #c_vis = cond_t.unsqueeze(0).expand(n_fake, -1)
+
             fake = G_raw(z, c_vis).cpu().numpy()   # (n_fake, 1, D, H, W)
 
             fake_raw = fake[:, 0]                          # (n_fake, D, H, W)
@@ -489,6 +482,10 @@ def main():
             part_json = os.path.join(args.outdir, f"{base_prefix}.json")
 
             part_record = {
+                "arch": args.arch,
+                "gen_kind": gen_kind,
+                "disc_kind": disc_kind,
+                "checkpoint_step": int(step),
                 "sample_array_index": int(sample_idx),
                 "cond_dim": int(cond_dim),
                 "cond_str": cond_str,
@@ -523,11 +520,13 @@ def main():
                         else fake_mass_summary["is_positive"].tolist()
                     ),
                 }
+            
+            # 1) Merge decoded condition fields into the record
+            part_record.update(decoded_cond_fields)
+            part_record["part_json"] = os.path.basename(part_json)
 
             with open(part_json, "w") as f:
                 json.dump(part_record, f, indent=2)
-
-            part_record["part_json"] = os.path.basename(part_json)
 
             run_summary["parts"].append(part_record)
 

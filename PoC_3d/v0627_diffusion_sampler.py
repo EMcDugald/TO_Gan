@@ -99,6 +99,22 @@ def get_mass_meta(meta):
     }
 
 
+def decode_condition_fields(cond_vec, cond_slices):
+    decoded = {}
+    for key in [
+        "bc_points", "bc_mask", "bc_count", "bc_dofs", "load_point", "load_bins",
+        "load_dir", "bc_x_range", "bc_y_range", "bc_z_range", "bc_bins"
+    ]:
+        if key in cond_slices:
+            s, e = cond_slices[key]
+            vals = np.asarray(cond_vec[s:e])
+            if key == "bc_count":
+                decoded[f"cond_{key}"] = float(vals[0]) if len(vals) else None
+            else:
+                decoded[f"cond_{key}"] = vals.tolist()
+    return decoded
+
+
 def summarize_fake_mass_from_bin(batch_bin_np, meta):
     """
     batch_bin_np: numpy array of shape (B, D, H, W) with values 0/1
@@ -276,7 +292,7 @@ def run_diffusion_sampler(
     print(f"[diffusion-sampler] selected indices (subset={subset}): {selected_indices}")
     print(f"[diffusion-sampler] subset size: {len(subset_indices_full)}")
 
-    # Conditioning spec + label_mode (same logic as trainer)
+    # Conditioning spec + cond_slices + label_mode (same logic as trainer)
     if "conditioning_spec_json" in meta:
         conditioning_spec = json.loads(str(meta["conditioning_spec_json"]))
     elif "conditioning_spec" in meta:
@@ -288,6 +304,13 @@ def run_diffusion_sampler(
             "load_location": str(meta["load_location_mode"]) if "load_location_mode" in meta else "unknown",
             "load_direction": str(meta["load_direction_mode"]) if "load_direction_mode" in meta else "unknown",
         }
+
+    if "cond_slices_json" in meta:
+        cond_slices = json.loads(str(meta["cond_slices_json"]))
+    elif "cond_slices" in meta:
+        cond_slices = meta["cond_slices"].item()
+    else:
+        cond_slices = None
 
     label_mode = str(meta["label_mode"]) if "label_mode" in meta else "unknown"
     mass_info = get_mass_meta(meta)
@@ -310,6 +333,7 @@ def run_diffusion_sampler(
         "dataset_metadata": {
             "cond_dim": int(cond_dim),
             "conditioning_spec": conditioning_spec,
+            "cond_slices": cond_slices,
             "shape3d": [int(img_size), int(img_size), int(img_size)],
             "label_mode": label_mode,
             "mass_info": mass_info,
@@ -442,6 +466,7 @@ def run_diffusion_sampler(
                 "cond_str": cond_str,
                 "cond_vector": cond_vec.tolist(),
                 "conditioning_spec": spec,
+                "cond_slices": cond_slices,
                 "mode_tag": mode_tag,
                 "train_plot_png": os.path.basename(train_png),
                 "n_per_condition": int(n_fake),
@@ -454,6 +479,9 @@ def run_diffusion_sampler(
                 "load_dir": load_dir.tolist() if load_dir is not None else None,
                 "mass_summary": None,
             }
+
+            if cond_slices is not None:
+                part_record.update(decode_condition_fields(cond_vec, cond_slices))
 
             if fake_mass_summary is not None:
                 part_record["mass_summary"] = {
