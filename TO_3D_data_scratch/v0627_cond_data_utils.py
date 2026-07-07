@@ -320,6 +320,7 @@ def generate_dataset_common(
     shapes,
     bcs,
     loads,
+    vfs,
     outdir,
     conditioning_spec,
     positive_if,
@@ -331,6 +332,8 @@ def generate_dataset_common(
     indices = [i for i, shp in enumerate(shapes) if tuple(np.asarray(shp).tolist()) == tuple(shape_tuple)]
     if not indices:
         raise ValueError(f'No samples found with shape {shape_tuple}')
+    
+    vfs = np.asarray(vfs, dtype=np.float64).reshape(-1)
 
     print(f'Found {len(indices)} total entries with shape {shape_tuple}')
 
@@ -437,6 +440,7 @@ def generate_dataset_common(
             "part_shape": np.asarray(shapes[idx], dtype=np.int32),
             "bc_count": int(aux["bc_count"]),
             "mass_fraction": float(mfrac),
+            "volume_fraction": float(vfs[idx]),
         }
 
         results.append((voxel_arr, cond_vec, int(label_val), cond_str, sample_info))

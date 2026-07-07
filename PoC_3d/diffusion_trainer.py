@@ -2,6 +2,8 @@ import os
 from pathlib import Path
 import argparse
 import functools
+import json
+from datetime import datetime
 import yaml
 import numpy as np
 import torch
@@ -25,7 +27,9 @@ def str2bool(v):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="3D conditional VPSDE diffusion for voxel structures")
+    parser = argparse.ArgumentParser(
+        description="3D conditional VPSDE diffusion for BC/load-conditioned voxel structures"
+    )
     parser.add_argument("--device", default="cuda", type=str)
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--batchsize", default=4, type=int)
@@ -41,6 +45,7 @@ def parse_args():
     parser.add_argument("--mode", default="X0", type=str)
     parser.add_argument("--loss_weighting", default="Simple", type=str)
     parser.add_argument("--data_file", type=str, required=True)
+    parser.add_argument("--meta_path", type=str, default=None)
     parser.add_argument("--img_size", default=32, type=int)
     parser.add_argument("--nsamples", default=0, type=int)
     parser.add_argument("--val_frac", default=0.1, type=float)
@@ -54,10 +59,16 @@ def parse_args():
     parser.add_argument("--sample_rtol", default=1e-4, type=float)
     parser.add_argument("--sample_eps", default=1e-3, type=float)
     parser.add_argument("--num_workers", default=0, type=int)
+    parser.add_argument("--tag", default="", type=str)
     return vars(parser.parse_args())
 
 
 class CondVoxelDataset3D(Dataset):
+    """
+    Dataset for BC/load-conditioned voxel structures:
+      npy entries: (voxel, cond_vec, label, cond_str)
+      voxel in [0, 1] → rescaled to [-1, 1]
+    """
     def __init__(self, npy_path, img_size=32):
         npy_path = Path(npy_path)
         if not npy_path.exists():
@@ -69,18 +80,25 @@ class CondVoxelDataset3D(Dataset):
         labels = [x[2] for x in data]
         cond_strs = [x[3] for x in data]
 
+        if len(data) > 0 and len(data[0]) >= 5:
+            sample_infos = [x[4] if x[4] is not None else {} for x in data]
+        else:
+            sample_infos = [{} for _ in data]
+
         X = np.stack(voxels).astype(np.float32)
         C = np.stack(conds).astype(np.float32)
         y = np.asarray(labels).astype(np.int64)
 
         if X.ndim == 4:
             X = X[:, None, :, :, :]
+        # Scale to [-1, 1] like the GAN trainers
         X = X * 2.0 - 1.0
 
         self.X = X
         self.C = C
         self.y = y
         self.cond_strs = cond_strs
+        self.sample_infos = sample_infos
         self.N, self.Cx, self.D, self.H, self.W = self.X.shape
         self.cond_dim = self.C.shape[1]
 
@@ -106,19 +124,84 @@ class CondVoxelDataset3D(Dataset):
         )
 
 
-def make_loaders(npy_path, batchsize, nsamples, img_size=32, val_frac=0.1, seed=42, num_workers=0):
+def make_loaders_positive_only(
+    npy_path,
+    batchsize,
+    nsamples,
+    img_size=32,
+    val_frac=0.1,
+    seed=42,
+    num_workers=0,
+):
+    """
+    Make train/val loaders from positive-only subset (y == 1),
+    for direct comparison to the GAN's positive distribution.
+    """
     dataset = CondVoxelDataset3D(npy_path, img_size=img_size)
+
+    # Positive mask
+    pos_indices = np.where(dataset.y == 1)[0]
+    if len(pos_indices) == 0:
+        raise ValueError("No positive (label==1) samples found in dataset")
+
+    # Restrict to nsamples positives if requested
     if nsamples is None or nsamples <= 0:
-        nsamples = len(dataset)
-    nsamples = min(nsamples, len(dataset))
+        nsamples = len(pos_indices)
+    nsamples = min(nsamples, len(pos_indices))
+
+    # Build positive-only sub-dataset
+    pos_indices = pos_indices[:nsamples]
+    pos_X = dataset.X[pos_indices]
+    pos_C = dataset.C[pos_indices]
+    pos_y = dataset.y[pos_indices]
+    pos_cond_strs = [dataset.cond_strs[int(i)] for i in pos_indices]
+    pos_sample_infos = [dataset.sample_infos[int(i)] for i in pos_indices]
+
+    class PositiveSubset(Dataset):
+        def __init__(self, X, C, y, cond_strs, sample_infos):
+            self.X = X
+            self.C = C
+            self.y = y
+            self.cond_strs = cond_strs
+            self.sample_infos = sample_infos
+            self.N = X.shape[0]
+            self.cond_dim = C.shape[1]
+
+        def __len__(self):
+            return self.N
+
+        def __getitem__(self, idx):
+            return (
+                torch.from_numpy(self.X[idx]),
+                torch.from_numpy(self.C[idx]),
+                torch.tensor(self.y[idx], dtype=torch.long),
+                idx,
+            )
+
+    pos_dataset = PositiveSubset(pos_X, pos_C, pos_y, pos_cond_strs, pos_sample_infos)
+
+    # Split positive-only subset into train/val
     torch.manual_seed(seed)
-    subset, _ = random_split(dataset, [nsamples, len(dataset) - nsamples])
     n_val = max(1, int(val_frac * nsamples))
     n_train = nsamples - n_val
-    train_set, val_set = random_split(subset, [n_train, n_val])
-    train_loader = DataLoader(train_set, batch_size=batchsize, shuffle=True, num_workers=num_workers, pin_memory=True)
-    val_loader = DataLoader(val_set, batch_size=batchsize, shuffle=False, num_workers=num_workers, pin_memory=True)
-    return dataset, train_loader, val_loader
+    generator = torch.Generator().manual_seed(seed)
+    train_set, val_set = random_split(pos_dataset, [n_train, n_val], generator=generator)
+
+    train_loader = DataLoader(
+        train_set,
+        batch_size=batchsize,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+    val_loader = DataLoader(
+        val_set,
+        batch_size=batchsize,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+    return pos_dataset, train_loader, val_loader
 
 
 def marginal_prob_mean(t, bmin, bmax):
@@ -343,9 +426,16 @@ def get_bin_centers(edges):
     return 0.5 * (edges[:-1] + edges[1:])
 
 
-def load_meta_for_data(data_path):
-    base = os.path.splitext(data_path)[0]
-    meta_path = base + "_meta.npz"
+def resolve_meta_path(data_path, meta_path=None):
+    if meta_path is not None:
+        return meta_path
+    if data_path.endswith('.npy'):
+        return data_path[:-4] + '_meta.npz'
+    raise ValueError('Could not infer meta path; please provide --meta_path')
+
+
+def load_meta_for_data(data_path, meta_path=None):
+    meta_path = resolve_meta_path(data_path, meta_path)
     if not os.path.exists(meta_path):
         raise FileNotFoundError(f"Meta file not found: {meta_path}")
     return np.load(meta_path, allow_pickle=True), meta_path
@@ -353,95 +443,124 @@ def load_meta_for_data(data_path):
 
 def decode_condition_overlay(cond_vec, meta):
     """
-    Decode BC points and load point/dir from a condition vector
-    created by generate_voxels_mass_conditioned_with_label_in_cond.
-
-    Assumes cond = [base_cond_vec, label_bit].
+    Decode BC points and load point/dir from a condition vector that uses
+    cond_slices + conditioning_spec, as in the new GAN trainers.
     """
     cond_vec = np.asarray(cond_vec, dtype=np.float32)
-    cond_dim = cond_vec.shape[0]
-    label_idx = int(meta.get("label_index_in_condition", cond_dim - 1))
-    base_dim = int(meta.get("base_cond_dim", label_idx))
 
-    base = cond_vec[:base_dim]
-    label_bit = float(cond_vec[label_idx])
+    # ---- load cond_slices ----
+    if 'cond_slices' in meta:
+        cond_slices = meta['cond_slices'].item()
+    elif 'cond_slices_json' in meta:
+        cond_slices = json.loads(str(meta['cond_slices_json']))
+    else:
+        cond_slices = None
 
-    conditioning_mode = str(meta["conditioning_mode"])
-    max_bc_points = int(meta["bc_count_max"])
+    bc_count_max = int(meta['bc_count_max']) if 'bc_count_max' in meta else None
 
-    bc_points = []
+    # ---- load conditioning_spec ----
+    if 'conditioning_spec' in meta:
+        conditioning_spec = meta['conditioning_spec'].item()
+    elif 'conditioning_spec_json' in meta:
+        conditioning_spec = json.loads(str(meta['conditioning_spec_json']))
+    else:
+        # fall back to separate mode fields if present
+        conditioning_spec = {
+            'bc_locations': str(meta['bc_locations_mode']) if 'bc_locations_mode' in meta else 'unknown',
+            'bc_dofs': str(meta['bc_dofs_mode']) if 'bc_dofs_mode' in meta else 'unknown',
+            'load_location': str(meta['load_location_mode']) if 'load_location_mode' in meta else 'unknown',
+            'load_direction': str(meta['load_direction_mode']) if 'load_direction_mode' in meta else 'unknown',
+        }
+
+    bc_points = np.empty((0, 3), dtype=np.float32)
     load_point = None
     load_dir = None
 
-    if conditioning_mode == "fine":
-        bc_flat_len = max_bc_points * 3
-        mask_len = max_bc_points
+    # Load dir from slices if available
+    if cond_slices is not None and 'load_dir' in cond_slices:
+        s0, s1 = cond_slices['load_dir']
+        load_dir = np.asarray(cond_vec[s0:s1], dtype=np.float32)
 
-        bc_flat = base[:bc_flat_len]
-        bc_mask = base[bc_flat_len:bc_flat_len + mask_len]
-        bc_count = int(round(float(base[bc_flat_len + mask_len])))
+    # Fine BC locations
+    if cond_slices is not None and conditioning_spec.get('bc_locations') == 'fine' and 'bc_points' in cond_slices:
+        s0, s1 = cond_slices['bc_points']
+        bc_flat = cond_vec[s0:s1]
 
-        lp_start = bc_flat_len + mask_len + 1
-        load_point = base[lp_start:lp_start + 3]
-        load_dir = base[lp_start + 3:lp_start + 6]
+        if 'bc_mask' in cond_slices:
+            m0, m1 = cond_slices['bc_mask']
+            bc_mask = cond_vec[m0:m1] > 0.5
+        else:
+            bc_mask = None
 
-        bc_arr = bc_flat.reshape(max_bc_points, 3)
-        valid = bc_mask > 0.5
-        bc_points = bc_arr[valid][:bc_count]
+        if 'bc_count' in cond_slices:
+            c0, c1 = cond_slices['bc_count']
+            bc_count = int(round(float(cond_vec[c0:c1][0])))
+        else:
+            bc_count = bc_count_max if bc_count_max is not None else len(bc_flat) // 3
 
-    elif conditioning_mode == "coarse":
-        x_edges = np.asarray(meta["spatial_bin_edges_x"], dtype=np.float64)
-        y_edges = np.asarray(meta["spatial_bin_edges_y"], dtype=np.float64)
-        z_edges = np.asarray(meta["spatial_bin_edges_z"], dtype=np.float64)
+        bc_arr = bc_flat.reshape(-1, 3)
+        if bc_mask is not None:
+            bc_points = bc_arr[bc_mask][:bc_count]
+        else:
+            bc_points = bc_arr[:bc_count]
 
+    # Coarse BC locations
+    elif cond_slices is not None and conditioning_spec.get('bc_locations') == 'coarse' and 'bc_bins' in cond_slices:
+        x_edges = np.asarray(meta['spatial_bin_edges_x'], dtype=np.float64)
+        y_edges = np.asarray(meta['spatial_bin_edges_y'], dtype=np.float64)
+        z_edges = np.asarray(meta['spatial_bin_edges_z'], dtype=np.float64)
         x_centers = get_bin_centers(x_edges)
         y_centers = get_bin_centers(y_edges)
         z_centers = get_bin_centers(z_edges)
 
-        pos = 0
-        pos += 2
-        pos += 2
-        pos += 2
+        s0, s1 = cond_slices['bc_bins']
+        bc_bins_flat = cond_vec[s0:s1]
+        bc_arr = bc_bins_flat.reshape(-1, 3)
 
-        bc_bins_flat = base[pos:pos + max_bc_points * 3]
-        pos += max_bc_points * 3
+        if 'bc_mask' in cond_slices:
+            m0, m1 = cond_slices['bc_mask']
+            bc_mask = cond_vec[m0:m1] > 0.5
+            bc_arr = bc_arr[bc_mask]
 
-        bc_mask = base[pos:pos + max_bc_points]
-        pos += max_bc_points
+        if 'bc_count' in cond_slices:
+            c0, c1 = cond_slices['bc_count']
+            bc_count = int(round(float(cond_vec[c0:c1][0])))
+            bc_arr = bc_arr[:bc_count]
 
-        bc_count = int(round(float(base[pos])))
-        pos += 1
-
-        load_bins = base[pos:pos + 3]
-        pos += 3
-
-        load_dir = base[pos:pos + 3]
-
-        bc_bins = bc_bins_flat.reshape(max_bc_points, 3)
-        bc_bins = bc_bins[bc_mask > 0.5][:bc_count]
-
-        bc_points = []
-        for bx, by, bz in bc_bins:
+        pts = []
+        for bx, by, bz in bc_arr:
             bx = int(np.clip(round(float(bx)), 0, len(x_centers) - 1))
             by = int(np.clip(round(float(by)), 0, len(y_centers) - 1))
             bz = int(np.clip(round(float(bz)), 0, len(z_centers) - 1))
-            bc_points.append([x_centers[bx], y_centers[by], z_centers[bz]])
-        bc_points = np.asarray(bc_points, dtype=np.float32)
+            pts.append([x_centers[bx], y_centers[by], z_centers[bz]])
+        bc_points = np.asarray(pts, dtype=np.float32)
 
+    # Fine load location
+    if cond_slices is not None and conditioning_spec.get('load_location') == 'fine' and 'load_point' in cond_slices:
+        s0, s1 = cond_slices['load_point']
+        load_point = np.asarray(cond_vec[s0:s1], dtype=np.float32)
+
+    # Coarse load location
+    elif cond_slices is not None and conditioning_spec.get('load_location') == 'coarse' and 'load_bins' in cond_slices:
+        x_edges = np.asarray(meta['spatial_bin_edges_x'], dtype=np.float64)
+        y_edges = np.asarray(meta['spatial_bin_edges_y'], dtype=np.float64)
+        z_edges = np.asarray(meta['spatial_bin_edges_z'], dtype=np.float64)
+        x_centers = get_bin_centers(x_edges)
+        y_centers = get_bin_centers(y_edges)
+        z_centers = get_bin_centers(z_edges)
+
+        s0, s1 = cond_slices['load_bins']
+        load_bins = cond_vec[s0:s1]
         lbx = int(np.clip(round(float(load_bins[0])), 0, len(x_centers) - 1))
         lby = int(np.clip(round(float(load_bins[1])), 0, len(y_centers) - 1))
         lbz = int(np.clip(round(float(load_bins[2])), 0, len(z_centers) - 1))
         load_point = np.array([x_centers[lbx], y_centers[lby], z_centers[lbz]], dtype=np.float32)
 
-    else:
-        raise ValueError(f"Unknown conditioning_mode: {conditioning_mode}")
-
     return {
-        "bc_points": np.asarray(bc_points, dtype=np.float32),
-        "load_point": None if load_point is None else np.asarray(load_point, dtype=np.float32),
-        "load_dir": None if load_dir is None else np.asarray(load_dir, dtype=np.float32),
-        "label_bit": label_bit,
-        "conditioning_mode": conditioning_mode,
+        "bc_points": bc_points,
+        "load_point": load_point,
+        "load_dir": load_dir,
+        "conditioning_spec": conditioning_spec,
     }
 
 
@@ -559,7 +678,7 @@ def ode_sampler_voxel_cond(score_model, x_shape, cond, marginal_prob_mean, margi
 
 
 def save_sample_batch(model, dataset, model_dir, epoch, config, device,
-                      marginal_prob_mean_fn, marginal_prob_std_fn, drift_coeff_fn):
+                      marginal_prob_mean_fn, marginal_prob_std_fn, drift_coeff_fn, meta):
     samples_dir = model_dir / f"samples_epoch_{epoch:04d}"
     samples_dir.mkdir(parents=True, exist_ok=True)
 
@@ -567,12 +686,11 @@ def save_sample_batch(model, dataset, model_dir, epoch, config, device,
     img_size = config["img_size"]
     x_shape = torch.Size([batch_size, 1, img_size, img_size, img_size])
 
+    # Sample conditions from positive-only dataset
     chosen = np.random.choice(len(dataset), size=batch_size, replace=(len(dataset) < batch_size))
     cond_np = dataset.C[chosen]
     cond = torch.from_numpy(cond_np).float().to(device)
-
-    # Load meta for decoding BC/load
-    meta, meta_path = load_meta_for_data(config["data_file"])
+    sample_infos = getattr(dataset, "sample_infos", None)
 
     with torch.no_grad():
         x_traj, x_final = ode_sampler_voxel_cond(
@@ -599,20 +717,30 @@ def save_sample_batch(model, dataset, model_dir, epoch, config, device,
 
     manifest_path = samples_dir / "sample_manifest.txt"
     with open(manifest_path, "w") as f:
-        f.write("# idx  label_bit  png_filename\n")
+        f.write("# idx  png_filename  source_index  train_mass_fraction  volume_fraction  bc_mode  load_loc_mode  load_dir_mode\n")
         for i in range(min(batch_size, 16)):
             overlay = decode_condition_overlay(cond_np[i], meta)
-            label_bit = overlay["label_bit"]
             bc_points = overlay["bc_points"]
             load_point = overlay["load_point"]
             load_dir = overlay["load_dir"]
+            spec = overlay["conditioning_spec"]
+
+            sample_info = sample_infos[int(chosen[i])] if sample_infos is not None else {}
+            if sample_info is None:
+                sample_info = {}
+
+            source_index = sample_info.get("source_index", None) if isinstance(sample_info, dict) else None
+            train_mass_fraction = sample_info.get("mass_fraction", None) if isinstance(sample_info, dict) else None
+            volume_fraction = sample_info.get("volume_fraction", None) if isinstance(sample_info, dict) else None
 
             png_name = f"sample_{i:02d}.png"
             png_path = samples_dir / png_name
 
             title = (
                 f"Epoch {epoch} sample {i} | "
-                f"mode={overlay['conditioning_mode']} | label={label_bit:.0f}"
+                f"bc={spec.get('bc_locations')} | "
+                f"load_loc={spec.get('load_location')} | "
+                f"load_dir={spec.get('load_direction')}"
             )
             plot_voxel_with_conditions(
                 x_bin[i, 0],
@@ -623,7 +751,15 @@ def save_sample_batch(model, dataset, model_dir, epoch, config, device,
                 load_vec=load_dir,
             )
 
-            f.write(f"{i}\t{label_bit:.0f}\t{png_name}\n")
+            f.write(
+                f"{i}\t{png_name}\t"
+                f"{source_index}\t"
+                f"{train_mass_fraction}\t"
+                f"{volume_fraction}\t"
+                f"{spec.get('bc_locations')}\t"
+                f"{spec.get('load_location')}\t"
+                f"{spec.get('load_direction')}\n"
+            )
 
     print(f"Saved samples with BC/load overlays to {samples_dir}")
 
@@ -636,17 +772,57 @@ def main():
 
     log_root = Path(config["log_root"])
     log_root.mkdir(parents=True, exist_ok=True)
-    existing = [d for d in log_root.glob("version_*") if d.is_dir()]
-    next_ver = max([int(d.name.split("_")[1]) for d in existing], default=-1) + 1
-    model_save_dir = log_root / f"version_{next_ver}"
+
+    # Load meta and log some key mass/conditioning info
+    meta, meta_path = load_meta_for_data(config["data_file"], config["meta_path"])
+
+    if 'conditioning_spec_json' in meta:
+        conditioning_spec = json.loads(str(meta['conditioning_spec_json']))
+    elif 'conditioning_spec' in meta:
+        conditioning_spec = meta['conditioning_spec'].item()
+    else:
+        conditioning_spec = {
+            'bc_locations': str(meta['bc_locations_mode']) if 'bc_locations_mode' in meta else 'unknown',
+            'bc_dofs': str(meta['bc_dofs_mode']) if 'bc_dofs_mode' in meta else 'unknown',
+            'load_location': str(meta['load_location_mode']) if 'load_location_mode' in meta else 'unknown',
+            'load_direction': str(meta['load_direction_mode']) if 'load_direction_mode' in meta else 'unknown',
+        }
+
+    meta_info = {
+        'mass_cutoff_value': float(meta['mass_cutoff_value']) if 'mass_cutoff_value' in meta else None,
+        'mass_cutoff_method': str(meta['mass_cutoff_method']) if 'mass_cutoff_method' in meta else 'unknown',
+        'positive_if': str(meta['positive_if']) if 'positive_if' in meta else 'unknown',
+        'label_mode': str(meta['label_mode']) if 'label_mode' in meta else 'unknown',
+        'conditioning_spec': conditioning_spec,
+    }
+
+    # Build a descriptive run name similar to GAN trainers
+    cond_tag = (
+        f"bcLoc-{meta_info['conditioning_spec'].get('bc_locations','unknown')}_"
+        f"bcDofs-{meta_info['conditioning_spec'].get('bc_dofs','unknown')}_"
+        f"loadLoc-{meta_info['conditioning_spec'].get('load_location','unknown')}_"
+        f"loadDir-{meta_info['conditioning_spec'].get('load_direction','unknown')}"
+    )
+    mass_tag = f"massLabel-{meta_info['positive_if']}"
+    extra_tag = f"_{config['tag']}" if config["tag"] else ""
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    run_name = (
+        f"{cond_tag}_{mass_tag}_"
+        f"mode-{config['mode']}_epochs-{config['nepochs']}_bs-{config['batchsize']}_"
+        f"c1-{config['unet_ch1_dim']}_c2-{config['unet_ch2_dim']}_c3-{config['unet_ch3_dim']}"
+        f"{extra_tag}_{timestamp}"
+    )
+
+    model_save_dir = log_root / run_name
     ckpt_loc_dir = model_save_dir / "checkpoints"
     model_save_dir.mkdir(parents=True, exist_ok=False)
     ckpt_loc_dir.mkdir()
 
     with open(model_save_dir / "hparams.yml", "w") as f:
-        yaml.dump(config, f)
+        yaml.dump({**config, **meta_info, 'meta_path': str(meta_path)}, f)
 
-    dataset, train_loader, val_loader = make_loaders(
+    dataset, train_loader, val_loader = make_loaders_positive_only(
         npy_path=config["data_file"],
         batchsize=config["batchsize"],
         nsamples=config["nsamples"],
@@ -677,6 +853,7 @@ def main():
         prev_dir = log_root / f"version_{config['load_version']}" / "checkpoints"
         ckpt_loc = prev_dir / "ckpt_best.pth"
         score_model.load_state_dict(torch.load(ckpt_loc, map_location=device))
+        print(f"Loaded previous best checkpoint from {ckpt_loc}")
 
     optimizer = Adam(score_model.parameters(), lr=config["lr"])
     ema = ExponentialMovingAverage(score_model.parameters(), decay=config["ema_decay"])
@@ -780,6 +957,7 @@ def main():
                     marginal_prob_mean_fn,
                     marginal_prob_std_fn,
                     drift_coeff_fn,
+                    meta,
                 )
             score_model.train()
 

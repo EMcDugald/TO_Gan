@@ -31,6 +31,7 @@ def main():
     shapes = np.load(os.path.join(args.data_root, "shapes.npy"), allow_pickle=True)
     bcs = np.load(os.path.join(args.data_root, "boundary_conditions.npy"), allow_pickle=True)
     loads = np.load(os.path.join(args.data_root, "loads.npy"), allow_pickle=True)
+    vfs = np.load(os.path.join(args.data_root, "vfs.npy"), allow_pickle=True).reshape(-1)
 
     conditioning_spec = parse_conditioning_spec(args.conditioning_spec)
 
@@ -41,6 +42,7 @@ def main():
         shapes=shapes,
         bcs=bcs,
         loads=loads,
+        vfs=vfs,
         outdir=args.outdir,
         conditioning_spec=conditioning_spec,
         positive_if=args.positive_if,

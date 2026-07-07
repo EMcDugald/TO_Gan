@@ -2,6 +2,7 @@ import argparse
 import csv
 import os
 from datetime import datetime
+import json
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,29 +22,34 @@ class CondVoxelDataset(Dataset):
         if not os.path.exists(filepath):
             raise DataNotFoundError(f"File not found: {filepath}")
         data = np.load(filepath, allow_pickle=True)
+
         voxels = [x[0] for x in data]
         conds = [x[1] for x in data]
         labels = [x[2] for x in data]
         cond_strs = [x[3] for x in data]
+        sample_infos = [
+            x[4] if len(x) > 4 and x[4] is not None else {}
+            for x in data
+        ]
+
         X = torch.tensor(np.stack(voxels), dtype=torch.float32)
         C = torch.tensor(np.stack(conds), dtype=torch.float32)
         y = torch.tensor(labels, dtype=torch.long)
+
         self.cond_strs = cond_strs
+        self.sample_infos = sample_infos
+
         if X.ndim == 4:
             X = X.unsqueeze(1)
         X = X * 2 - 1
+
         self.X = X
         self.C = C
         self.y = y
+
         print("Total samples:", X.shape[0])
         print("Condition dim:", C.shape[1])
         print("Positives:", int((y == 1).sum().item()), "Negatives:", int((y == 0).sum().item()))
-
-    def __len__(self):
-        return self.X.shape[0]
-
-    def __getitem__(self, idx):
-        return self.X[idx], self.C[idx], self.y[idx]
 
 
 class ReusableDataLoader:
@@ -76,6 +82,41 @@ def mass_fraction_batch(batch_np):
     return v.mean(axis=(1, 2, 3))
 
 
+def summarize_fake_mass_from_bin(batch_bin_np, meta):
+    """
+    batch_bin_np: numpy array of shape (B, D, H, W) with values 0/1.
+    meta: np.load(..., allow_pickle=True) result (the full meta npz).
+
+    Uses get_mass_meta(meta) to interpret mass_cutoff_value and positive_if.
+    """
+    batch_bin_np = np.asarray(batch_bin_np, dtype=np.float64)
+    if batch_bin_np.ndim != 4:
+        raise ValueError(f"Expected batch_bin_np shape (B,D,H,W), got {batch_bin_np.shape}")
+
+    mass_fractions = batch_bin_np.mean(axis=(1, 2, 3))
+
+    # Use your existing helper to read cutoff / positive_if
+    mass_info = get_mass_meta(meta)
+    cutoff = mass_info["mass_cutoff_value"]
+    positive_if = mass_info["positive_if"]
+
+    if positive_if in ("low_mass", "lowmass"):
+        is_positive = mass_fractions <= cutoff
+    elif positive_if in ("high_mass", "highmass"):
+        is_positive = mass_fractions >= cutoff
+    else:
+        raise ValueError(f"Unexpected positive_if in meta: {positive_if}")
+
+    return {
+        "mass_fractions": mass_fractions,
+        "cutoff": cutoff,
+        "positive_if": positive_if,
+        "is_positive": is_positive,
+        "positive_rate_percent": float(is_positive.mean() * 100.0),
+        "mean_mass": float(mass_fractions.mean()),
+    }
+
+
 def diversity_loss(x):
     r = torch.sum(x ** 2, dim=1, keepdim=True)
     D = r - 2 * torch.matmul(x, x.T) + r.T
@@ -91,6 +132,30 @@ def diversity_loss(x):
 def eval_dpp_div_from_voxels(batch_np, device):
     x = torch.tensor(batch_np.reshape(batch_np.shape[0], -1), dtype=torch.float32, device=device)
     return float(diversity_loss(x).item())
+
+
+def multiclass_ce_with_optional_label_smoothing(logits, target, smoothing=0.0):
+    """
+    Standard multiclass cross-entropy with optional label smoothing.
+
+    logits: (B, C)
+    target: (B,) integer class labels
+    smoothing: epsilon in [0, 1)
+
+    PyTorch-consistent smoothing:
+      target_dist = (1-eps) * one_hot + eps / num_classes
+    """
+    if smoothing <= 0.0:
+        return nn.functional.cross_entropy(logits, target)
+
+    num_classes = logits.size(1)
+    log_probs = torch.log_softmax(logits, dim=1)
+
+    with torch.no_grad():
+        true_dist = torch.full_like(logits, smoothing / num_classes)
+        true_dist.scatter_(1, target.unsqueeze(1), (1.0 - smoothing) + smoothing / num_classes)
+
+    return torch.sum(-true_dist * log_probs, dim=1).mean()
 
 
 class CondGenerator3d(nn.Module):
@@ -180,100 +245,121 @@ def get_bin_centers(edges):
 
 
 def decode_condition_overlay(cond_vec, meta):
-    """
-    Decode BC points and load point/dir from a condition vector created by
-    generate_voxels_mass_conditioned.
-    """
     cond_vec = np.asarray(cond_vec, dtype=np.float32)
 
-    # In this pipeline cond_vec is already the full conditioning vector.
-    # The mass label is stored separately in the dataset (x[2]), not inside cond_vec.
-    base = cond_vec
-    label_bit = None  # no embedded label bit
+    # ---- load cond_slices ----
+    if 'cond_slices' in meta:
+        cond_slices = meta['cond_slices'].item()
+    elif 'cond_slices_json' in meta:
+        cond_slices = json.loads(str(meta['cond_slices_json']))
+    else:
+        cond_slices = None
 
-    conditioning_mode = str(meta['conditioning_mode'])
-    max_bc_points = int(meta['bc_count_max'])
+    bc_count_max = int(meta['bc_count_max']) if 'bc_count_max' in meta else None
 
-    bc_points = []
+    # ---- load conditioning_spec ----
+    if 'conditioning_spec' in meta:
+        conditioning_spec = meta['conditioning_spec'].item()
+    elif 'conditioning_spec_json' in meta:
+        conditioning_spec = json.loads(str(meta['conditioning_spec_json']))
+    else:
+        # fall back to separate mode fields if present
+        conditioning_spec = {
+            'bc_locations': str(meta['bc_locations_mode']) if 'bc_locations_mode' in meta else 'unknown',
+            'bc_dofs': str(meta['bc_dofs_mode']) if 'bc_dofs_mode' in meta else 'unknown',
+            'load_location': str(meta['load_location_mode']) if 'load_location_mode' in meta else 'unknown',
+            'load_direction': str(meta['load_direction_mode']) if 'load_direction_mode' in meta else 'unknown',
+        }
+
+    bc_points = np.empty((0, 3), dtype=np.float32)
     load_point = None
     load_dir = None
 
-    conditioning_mode = str(meta['conditioning_mode'])
-    max_bc_points = int(meta['bc_count_max'])
+    # Load dir from slices if available
+    if cond_slices is not None and 'load_dir' in cond_slices:
+        s0, s1 = cond_slices['load_dir']
+        load_dir = np.asarray(cond_vec[s0:s1], dtype=np.float32)
 
-    bc_points = []
-    load_point = None
-    load_dir = None
+    # Fine BC locations
+    if cond_slices is not None and conditioning_spec.get('bc_locations') == 'fine' and 'bc_points' in cond_slices:
+        s0, s1 = cond_slices['bc_points']
+        bc_flat = cond_vec[s0:s1]
 
-    if conditioning_mode == 'fine':
-        bc_flat_len = max_bc_points * 3
-        mask_len = max_bc_points
+        if 'bc_mask' in cond_slices:
+            m0, m1 = cond_slices['bc_mask']
+            bc_mask = cond_vec[m0:m1] > 0.5
+        else:
+            bc_mask = None
 
-        bc_flat = base[:bc_flat_len]
-        bc_mask = base[bc_flat_len:bc_flat_len + mask_len]
-        bc_count = int(round(float(base[bc_flat_len + mask_len])))
+        if 'bc_count' in cond_slices:
+            c0, c1 = cond_slices['bc_count']
+            bc_count = int(round(float(cond_vec[c0:c1][0])))
+        else:
+            bc_count = bc_count_max if bc_count_max is not None else len(bc_flat) // 3
 
-        lp_start = bc_flat_len + mask_len + 1
-        load_point = base[lp_start:lp_start + 3]
-        load_dir = base[lp_start + 3:lp_start + 6]
+        bc_arr = bc_flat.reshape(-1, 3)
+        if bc_mask is not None:
+            bc_points = bc_arr[bc_mask][:bc_count]
+        else:
+            bc_points = bc_arr[:bc_count]
 
-        bc_arr = bc_flat.reshape(max_bc_points, 3)
-        valid = bc_mask > 0.5
-        bc_points = bc_arr[valid][:bc_count]
-
-    elif conditioning_mode == 'coarse':
+    # Coarse BC locations
+    elif cond_slices is not None and conditioning_spec.get('bc_locations') == 'coarse' and 'bc_bins' in cond_slices:
         x_edges = np.asarray(meta['spatial_bin_edges_x'], dtype=np.float64)
         y_edges = np.asarray(meta['spatial_bin_edges_y'], dtype=np.float64)
         z_edges = np.asarray(meta['spatial_bin_edges_z'], dtype=np.float64)
-
         x_centers = get_bin_centers(x_edges)
         y_centers = get_bin_centers(y_edges)
         z_centers = get_bin_centers(z_edges)
 
-        pos = 0
-        pos += 2
-        pos += 2
-        pos += 2
+        s0, s1 = cond_slices['bc_bins']
+        bc_bins_flat = cond_vec[s0:s1]
+        bc_arr = bc_bins_flat.reshape(-1, 3)
 
-        bc_bins_flat = base[pos:pos + max_bc_points * 3]
-        pos += max_bc_points * 3
+        if 'bc_mask' in cond_slices:
+            m0, m1 = cond_slices['bc_mask']
+            bc_mask = cond_vec[m0:m1] > 0.5
+            bc_arr = bc_arr[bc_mask]
 
-        bc_mask = base[pos:pos + max_bc_points]
-        pos += max_bc_points
+        if 'bc_count' in cond_slices:
+            c0, c1 = cond_slices['bc_count']
+            bc_count = int(round(float(cond_vec[c0:c1][0])))
+            bc_arr = bc_arr[:bc_count]
 
-        bc_count = int(round(float(base[pos])))
-        pos += 1
-
-        load_bins = base[pos:pos + 3]
-        pos += 3
-
-        load_dir = base[pos:pos + 3]
-
-        bc_bins = bc_bins_flat.reshape(max_bc_points, 3)
-        bc_bins = bc_bins[bc_mask > 0.5][:bc_count]
-
-        bc_points = []
-        for bx, by, bz in bc_bins:
+        pts = []
+        for bx, by, bz in bc_arr:
             bx = int(np.clip(round(float(bx)), 0, len(x_centers) - 1))
             by = int(np.clip(round(float(by)), 0, len(y_centers) - 1))
             bz = int(np.clip(round(float(bz)), 0, len(z_centers) - 1))
-            bc_points.append([x_centers[bx], y_centers[by], z_centers[bz]])
-        bc_points = np.asarray(bc_points, dtype=np.float32)
+            pts.append([x_centers[bx], y_centers[by], z_centers[bz]])
+        bc_points = np.asarray(pts, dtype=np.float32)
 
+    # Fine load location
+    if cond_slices is not None and conditioning_spec.get('load_location') == 'fine' and 'load_point' in cond_slices:
+        s0, s1 = cond_slices['load_point']
+        load_point = np.asarray(cond_vec[s0:s1], dtype=np.float32)
+
+    # Coarse load location
+    elif cond_slices is not None and conditioning_spec.get('load_location') == 'coarse' and 'load_bins' in cond_slices:
+        x_edges = np.asarray(meta['spatial_bin_edges_x'], dtype=np.float64)
+        y_edges = np.asarray(meta['spatial_bin_edges_y'], dtype=np.float64)
+        z_edges = np.asarray(meta['spatial_bin_edges_z'], dtype=np.float64)
+        x_centers = get_bin_centers(x_edges)
+        y_centers = get_bin_centers(y_edges)
+        z_centers = get_bin_centers(z_edges)
+
+        s0, s1 = cond_slices['load_bins']
+        load_bins = cond_vec[s0:s1]
         lbx = int(np.clip(round(float(load_bins[0])), 0, len(x_centers) - 1))
         lby = int(np.clip(round(float(load_bins[1])), 0, len(y_centers) - 1))
         lbz = int(np.clip(round(float(load_bins[2])), 0, len(z_centers) - 1))
         load_point = np.array([x_centers[lbx], y_centers[lby], z_centers[lbz]], dtype=np.float32)
 
-    else:
-        raise ValueError(f"Unknown conditioning_mode: {conditioning_mode}")
-
     return {
-        "bc_points": np.asarray(bc_points, dtype=np.float32),
-        "load_point": None if load_point is None else np.asarray(load_point, dtype=np.float32),
-        "load_dir": None if load_dir is None else np.asarray(load_dir, dtype=np.float32),
-        "label_bit": label_bit,
-        "conditioning_mode": conditioning_mode,
+        "bc_points": bc_points,
+        "load_point": load_point,
+        "load_dir": load_dir,
+        "conditioning_spec": conditioning_spec,
     }
 
 
@@ -351,6 +437,7 @@ def GAN_step_MDD_3d_cond_3class(
     smooth_real=0.1,
     d_update=True, use_label_smoothing=True,
     use_diversity_loss=False,
+    meta=None,
 ):
     criterion = nn.CrossEntropyLoss()
 
@@ -362,13 +449,11 @@ def GAN_step_MDD_3d_cond_3class(
 
         out_real_pos = D(P_batch, c_batch)
         prob_real_pos = torch.softmax(out_real_pos, dim=1)
-        if use_label_smoothing and smooth_real > 0.0:
-            log_probs = torch.log_softmax(out_real_pos, dim=1)
-            p_target = torch.zeros_like(out_real_pos)
-            p_target[:, 1] = 1.0 - smooth_real
-            L_D_real = -(p_target * log_probs).sum(dim=1).mean()
-        else:
-            L_D_real = criterion(out_real_pos, y_pos)
+        L_D_real = multiclass_ce_with_optional_label_smoothing(
+            out_real_pos,
+            y_pos,
+            smoothing=(smooth_real if use_label_smoothing else 0.0),
+        )
 
         out_real_neg = D(N_batch, c_batch)
         prob_real_neg = torch.softmax(out_real_neg, dim=1)
@@ -409,14 +494,12 @@ def GAN_step_MDD_3d_cond_3class(
     out_fake_for_G = D(fake_data, c_batch)
     prob_fake_for_G = torch.softmax(out_fake_for_G, dim=1)
 
-    if use_label_smoothing and smooth_real > 0.0:
-        log_probs_fake_for_G = torch.log_softmax(out_fake_for_G, dim=1)
-        p_real_for_G = torch.zeros_like(out_fake_for_G)
-        p_real_for_G[:, 1] = 1.0 - smooth_real
-        L_G = -(p_real_for_G * log_probs_fake_for_G).sum(dim=1).mean()
-    else:
-        y_pos = torch.full((batch_size,), 1, dtype=torch.long, device=device)
-        L_G = criterion(out_fake_for_G, y_pos)
+    y_pos = torch.full((batch_size,), 1, dtype=torch.long, device=device)
+    L_G = multiclass_ce_with_optional_label_smoothing(
+        out_fake_for_G,
+        y_pos,
+        smoothing=(smooth_real if use_label_smoothing else 0.0),
+    )
 
     if use_diversity_loss and diversity_weight > 0:
         feat = fake_data.view(fake_data.size(0), -1)
@@ -434,6 +517,18 @@ def GAN_step_MDD_3d_cond_3class(
     G_grad_norm = G_grad_norm ** 0.5
     G_opt.step()
 
+    # Mass statistics for this fake batch
+    mean_fake_mass = float('nan')
+    mass_positive_rate = float('nan')
+
+    if meta is not None:
+        # fake_data: (B, 1, D, H, W)
+        fake_np = fake_data.detach().cpu().numpy()
+        fake_bin_np = (fake_np[:, 0] > 0.0).astype(np.float64)  # (B, D, H, W)
+        mass_summary = summarize_fake_mass_from_bin(fake_bin_np, meta)
+        mean_fake_mass = mass_summary["mean_mass"]
+        mass_positive_rate = mass_summary["positive_rate_percent"]
+
     report = {
         'L_D_real': float(L_D_real.item()),
         'L_D_neg': float(L_D_neg.item()),
@@ -446,6 +541,8 @@ def GAN_step_MDD_3d_cond_3class(
         'P_fake_fake_D': float(prob_fake_for_D[:, 0].mean().item()),
         'P_pos_fake_D': float(prob_fake_for_D[:, 1].mean().item()),
         'P_pos_fake_G': float(prob_fake_for_G[:, 1].mean().item()),
+        'mean_fake_mass': float(mean_fake_mass),
+        'P_mass_positive_fake': float(mass_positive_rate),
     }
     if L_div is not None:
         report['L_div'] = float(L_div.item())
@@ -482,7 +579,8 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                 'L_D_real', 'L_D_neg', 'L_D_fake', 'L_G',
                 'D_grad_norm', 'G_grad_norm', 'L_div',
                 'P_pos_real_pos', 'P_neg_real_neg',
-                'P_fake_fake_D', 'P_pos_fake_D', 'P_pos_fake_G'
+                'P_fake_fake_D', 'P_pos_fake_D', 'P_pos_fake_G',
+                'mean_fake_mass', 'P_mass_positive_fake',
             ])
 
     steps_range = trange(start_step, num_steps, position=0, leave=True)
@@ -504,6 +602,7 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
             d_update=d_update,
             use_label_smoothing=use_label_smoothing,
             use_diversity_loss=use_diversity_loss,
+            meta=meta,
         )
 
         steps_range.set_postfix({k: f"{v:.4f}" for k, v in report.items() if isinstance(v, float)})
@@ -524,6 +623,8 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                 report.get('P_fake_fake_D', float('nan')),
                 report.get('P_pos_fake_D', float('nan')),
                 report.get('P_pos_fake_G', float('nan')),
+                report.get('mean_fake_mass', float('nan')),
+                report.get('P_mass_positive_fake', float('nan')),
             ])
 
         current_G_loss = report.get('L_G', None)
@@ -556,6 +657,9 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                 fake = G_raw(z, c_vis).cpu().numpy()
                 cond_np = c_vis.cpu().numpy()
                 cond_strs_vis = [cond_strs[int(i)] for i in idx_vis.cpu().numpy()]
+                # Mass summary for this periodic fake batch
+                fake_bin = (fake[:, 0] > 0.0).astype(np.float64)  # (n_vis_samples, D, H, W)
+                mass_summary = summarize_fake_mass_from_bin(fake_bin, meta)
 
             np.save(os.path.join(samples_subdir, 'fake_conditions.npy'), cond_np)
             np.save(os.path.join(samples_subdir, 'fake_indices.npy'), idx_vis.cpu().numpy())
@@ -568,8 +672,12 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                     bc_points = overlay["bc_points"]
                     load_point = overlay["load_point"]
                     load_dir = overlay["load_dir"]
-                    label_bit = overlay["label_bit"]
-                    mode_tag = overlay["conditioning_mode"]
+                    spec = overlay["conditioning_spec"]
+                    mode_tag = (
+                        f"bcLoc={spec.get('bc_locations')} "
+                        f"loadLoc={spec.get('load_location')} "
+                        f"loadDir={spec.get('load_direction')}"
+                    )
 
                     filename = f'fake_voxel_{i}.png'
                     fig_path = os.path.join(samples_subdir, filename)
@@ -584,6 +692,26 @@ def train_3d_cond(D, G, A, D_opt, G_opt, A_opt,
                     )
                     cond_str_num = ' '.join(f'{v:.6f}' for v in cond_np[i])
                     f_txt.write(f'{i:03d}  {filename}  {cond_str_num}  {cond_strs_vis[i]}\n')
+
+            # Save per-epoch mass summary as JSON
+            mass_json_path = os.path.join(
+                samples_subdir,
+                f'fake_mass_summary_epoch_{current_epoch:04d}_step_{step+1:08d}.json'
+            )
+            with open(mass_json_path, 'w') as f_mass:
+                json.dump({
+                    'epoch': int(current_epoch),
+                    'step': int(step + 1),
+                    'n_vis_samples': int(n_vis_samples),
+                    'mass_cutoff_value': float(mass_summary['cutoff']),
+                    'positive_if': mass_summary['positive_if'],
+                    'mean_mass': float(mass_summary['mean_mass']),
+                    'positive_rate_percent': float(mass_summary['positive_rate_percent']),
+                    'mass_fractions': mass_summary['mass_fractions'].tolist(),
+                    'is_positive': mass_summary['is_positive'].tolist(),
+                    'sample_indices': idx_vis.cpu().numpy().tolist(),
+                }, f_mass, indent=2)
+                
             G_raw.train()
 
     if checkpoint_dir is not None:
@@ -604,11 +732,24 @@ def resolve_meta_path(data_path, meta_path=None):
 def get_mass_meta(meta):
     if 'mass_cutoff_value' not in meta:
         raise KeyError('Expected mass_cutoff_value in meta file for new BC/load-only dataset')
+
+    # Prefer newer JSON/string-backed metadata, then fall back to older keys
+    if 'conditioning_spec_json' in meta:
+        conditioning_spec = json.loads(str(meta['conditioning_spec_json']))
+        conditioning_mode = str(conditioning_spec.get('bc_locations', 'unknown'))
+    elif 'conditioning_spec_str' in meta:
+        # purely for logging if json is unavailable
+        conditioning_mode = str(meta['conditioning_spec_str'])
+    elif 'conditioning_mode' in meta:
+        conditioning_mode = str(meta['conditioning_mode'])
+    else:
+        conditioning_mode = 'unknown'
+
     return {
         'mass_cutoff_value': float(meta['mass_cutoff_value']),
-        'mass_cutoff_method': str(meta['mass_cutoff_method']),
-        'positive_if': str(meta['positive_if']),
-        'conditioning_mode': str(meta['conditioning_mode']),
+        'mass_cutoff_method': str(meta['mass_cutoff_method']) if 'mass_cutoff_method' in meta else 'unknown',
+        'positive_if': str(meta['positive_if']) if 'positive_if' in meta else 'unknown',
+        'conditioning_mode': conditioning_mode,
         'label_mode': str(meta['label_mode']) if 'label_mode' in meta else 'unknown',
         'mass_quantile': (
             None if 'mass_quantile' not in meta or np.isnan(float(meta['mass_quantile']))
@@ -619,7 +760,7 @@ def get_mass_meta(meta):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train non-UNet 3D GAN-MDD on BC/load-conditioned, mass-labeled voxel data.')
+    parser = argparse.ArgumentParser(description='Train v0627 non-UNet 3D GAN-MDD on BC/load-conditioned, mass-labeled voxel data.')
     parser.add_argument('--data-path', type=str, required=True)
     parser.add_argument('--meta-path', type=str, default=None)
     parser.add_argument('--checkpoint-root', type=str, required=True)
@@ -693,11 +834,29 @@ def main():
     D_opt = optim.Adam(netD.parameters(), lr=args.lr_d, betas=(0.5, 0.999))
     G_opt = optim.Adam(netG.parameters(), lr=args.lr_g, betas=(0.5, 0.999))
 
-    mode_tag = meta_info['conditioning_mode']
+    if 'conditioning_spec_json' in meta:
+        conditioning_spec = json.loads(str(meta['conditioning_spec_json']))
+    elif 'conditioning_spec' in meta:
+        conditioning_spec = meta['conditioning_spec'].item()
+    else:
+        conditioning_spec = {
+            'bc_locations': str(meta['bc_locations_mode']) if 'bc_locations_mode' in meta else 'unknown',
+            'bc_dofs': str(meta['bc_dofs_mode']) if 'bc_dofs_mode' in meta else 'unknown',
+            'load_location': str(meta['load_location_mode']) if 'load_location_mode' in meta else 'unknown',
+            'load_direction': str(meta['load_direction_mode']) if 'load_direction_mode' in meta else 'unknown',
+        }
+
+    cond_tag = (
+        f'bcLoc-{conditioning_spec.get("bc_locations", "unknown")}_'
+        f'bcDofs-{conditioning_spec.get("bc_dofs", "unknown")}_'
+        f'loadLoc-{conditioning_spec.get("load_location", "unknown")}_'
+        f'loadDir-{conditioning_spec.get("load_direction", "unknown")}'
+    )
+
     label_tag = meta_info['positive_if']
     extra_tag = f'_{args.tag}' if args.tag else ''
     hp_name = (
-        f'{mode_tag}_massLabel_{label_tag}_epochs{args.num_epochs}_bs{args.batch_size}_'
+        f'{cond_tag}_massLabel_{label_tag}_epochs{args.num_epochs}_bs{args.batch_size}_'
         f'nz{args.nz}_ngf{args.ngf}_ndf{args.ndf}_nsamp{n_samples}_'
         f'lrD{args.lr_d}_lrG{args.lr_g}_smoothR{args.smooth_real}_'
         f'dEvery{args.d_every}_div{int(args.use_diversity_loss)}{extra_tag}'
@@ -733,12 +892,15 @@ def main():
         f_hp.write(f'mass_threshold_source = {meta_info["mass_threshold_source"]}\n')
         f_hp.write(f'mass_quantile = {meta_info["mass_quantile"]}\n')
         f_hp.write(f'positive_if = {meta_info["positive_if"]}\n')
-        f_hp.write(f'conditioning_mode = {meta_info["conditioning_mode"]}\n')
+        f_hp.write(f'conditioning_spec = {conditioning_spec}\n')
         f_hp.write(f'label_mode = {meta_info["label_mode"]}\n')
 
     steps_per_epoch = max(1, len(P) // args.batch_size)
     ckpt_interval = args.ckpt_every_epochs * steps_per_epoch
     eval_every_steps = args.eval_every_epochs * steps_per_epoch
+
+    pos_indices = torch.where(pos_mask)[0].cpu().numpy()
+    cond_strs_P = [dataset.cond_strs[int(i)] for i in pos_indices]
 
     netD, netG, _ = train_3d_cond(
         netD, netG, None,
@@ -752,7 +914,7 @@ def main():
         ckpt_interval=ckpt_interval,
         smooth_real=args.smooth_real,
         C_P_full=C_P,
-        cond_strs=dataset.cond_strs,
+        cond_strs=cond_strs_P,
         eval_every_steps=eval_every_steps,
         nz=args.nz,
         start_step=start_step,
@@ -769,7 +931,7 @@ def main():
         idx_vis = torch.randint(low=0, high=C_P.shape[0], size=(args.batch_size,))
         c_vis = C_P[idx_vis].to(device)
         fake = netG(z, c_vis).cpu().numpy()
-        cond_strs_vis = [dataset.cond_strs[int(i)] for i in idx_vis.cpu().numpy()]
+        cond_strs_vis = [cond_strs_P[int(i)] for i in idx_vis.cpu().numpy()]
         cond_np = c_vis.cpu().numpy()
         np.save(os.path.join(checkpoint_dir, 'fake_conditions_vis.npy'), cond_np)
         np.save(os.path.join(checkpoint_dir, 'fake_indices_vis.npy'), idx_vis.cpu().numpy())
@@ -781,8 +943,12 @@ def main():
                 bc_points = overlay["bc_points"]
                 load_point = overlay["load_point"]
                 load_dir = overlay["load_dir"]
-                label_bit = overlay["label_bit"]
-                mode_tag = overlay["conditioning_mode"]
+                spec = overlay["conditioning_spec"]
+                mode_tag = (
+                    f"bcLoc={spec.get('bc_locations')} "
+                    f"loadLoc={spec.get('load_location')} "
+                    f"loadDir={spec.get('load_direction')}"
+                )
 
                 filename = f'fake_voxel_{idx}.png'
                 fig_path = os.path.join(checkpoint_dir, filename)
@@ -841,7 +1007,7 @@ def main():
         f.write(f'mass_threshold_source: {meta_info["mass_threshold_source"]}\n')
         f.write(f'mass_quantile: {meta_info["mass_quantile"]}\n')
         f.write(f'positive_if: {meta_info["positive_if"]}\n')
-        f.write(f'conditioning_mode: {meta_info["conditioning_mode"]}\n')
+        f.write(f'conditioning_spec: {conditioning_spec}\n')
         f.write(f'Label-positive rate wrt train mass cutoff (%): {positive_rate:.4f}\n')
         f.write(f'Mean mass fraction: {mean_mass:.6f}\n')
         f.write(f'Mean DPP diversity: {mean_diversity:.6f}\n')
