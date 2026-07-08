@@ -401,6 +401,8 @@ def run_diffusion_sampler(
                 load_point=load_point,
                 load_vec=load_dir,
             )
+            train_bin_npy = os.path.join(outdir, f"{base_prefix}_train_bin.npy")
+            np.save(train_bin_npy, train_bin)
 
             # Build batch condition: repeat same cond_vec n_per_cond times
             n_fake = int(n_per_cond)
@@ -480,6 +482,7 @@ def run_diffusion_sampler(
                 "cond_slices": cond_slices,
                 "mode_tag": mode_tag,
                 "train_plot_png": os.path.basename(train_png),
+                "train_bin_npy": os.path.basename(train_bin_npy),
                 "n_per_condition": int(n_fake),
                 "fake_plot_pngs": fake_pngs,
                 "fake_raw_npy": os.path.basename(fake_raw_npy),

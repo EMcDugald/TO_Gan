@@ -469,6 +469,9 @@ def main():
                 load_vec=load_dir,
             )
 
+            train_bin_npy = os.path.join(args.outdir, f"{base_prefix}_train_bin.npy")
+            np.save(train_bin_npy, voxel_arr)
+
             fake_pngs = []
             for k in range(n_fake):
                 fake_png = os.path.join(args.outdir, f"{base_prefix}_fake{k:02d}.png")

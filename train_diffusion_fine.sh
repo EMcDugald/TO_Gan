@@ -20,7 +20,7 @@ LOG_ROOT="/xdisk/hdb/emcdugald/checkpoints/diffusion"
 DEVICE="cuda"
 
 BATCHSIZE=4
-NEPOCHS=500
+NEPOCHS=300
 LR=5e-5
 UNET_CH1=32
 UNET_CH2=64
