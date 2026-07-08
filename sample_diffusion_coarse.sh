@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=v0627_sample_diff_coarse
+#SBATCH --job-name=sample_diff_coarse
 #SBATCH --account=hdb
 #SBATCH --partition=gpu_standard
 #SBATCH --nodes=1
@@ -8,21 +8,21 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=02:00:00
-#SBATCH --output=v0627_sample_diff_coarse_%j.out
+#SBATCH --output=sample_diff_coarse_%j.out
 
 module load cuda11
 module load anaconda
 
 PYTHON="$HOME/.conda/envs/to_gan/bin/python"
-SCRIPT="$HOME/TO_Gan/PoC_3d/v0627_diffusion_sampler.py"
+SCRIPT="$HOME/TO_Gan/PoC_3d/diffusion_sampler.py"
 DEVICE="cuda"
 
-DATA_FILE="/xdisk/hdb/emcdugald/v0627/train_data/diffusion/10000_diffusion_condLabel_voxels_32x32x32_bcLoc-coarse_bcDofs-omit_loadLoc-coarse_loadDir-omit_low_mass_thr0.494781.npy"
-META_FILE="/xdisk/hdb/emcdugald/v0627/train_data/diffusion/10000_diffusion_condLabel_voxels_32x32x32_bcLoc-coarse_bcDofs-omit_loadLoc-coarse_loadDir-omit_low_mass_thr0.494781_meta.npz"
+DATA_FILE="/xdisk/hdb/emcdugald/train_data/diffusion/10000_diffusion_condLabel_voxels_32x32x32_bcLoc-coarse_bcDofs-omit_loadLoc-coarse_loadDir-omit_low_mass_thr0.494781.npy"
+META_FILE="/xdisk/hdb/emcdugald/train_data/diffusion/10000_diffusion_condLabel_voxels_32x32x32_bcLoc-coarse_bcDofs-omit_loadLoc-coarse_loadDir-omit_low_mass_thr0.494781_meta.npz"
 
-CKPT="/xdisk/hdb/emcdugald/v0627/checkpoints/diffusion/bcLoc-coarse_bcDofs-omit_loadLoc-coarse_loadDir-omit_massLabel-low_mass_mode-X0_epochs-500_bs-4_c1-64_c2-128_c3-256_20260629-002403/checkpoints/ckpt_best.pth"
+CKPT="/xdisk/hdb/emcdugald/checkpoints/diffusion/bcLoc-coarse_bcDofs-omit_loadLoc-coarse_loadDir-omit_massLabel-low_mass_mode-X0_epochs-500_bs-4_c1-64_c2-128_c3-256_20260629-002403/checkpoints/ckpt_best.pth"
 
-OUTDIR="/xdisk/hdb/emcdugald/v0627/sampler_tests/diffusion_coarse_ckpt_best_20260630"
+OUTDIR="/xdisk/hdb/emcdugald/sampler_tests/diffusion_coarse_ckpt_best_20260630"
 
 IMG_SIZE=32
 UNET_CH1=64

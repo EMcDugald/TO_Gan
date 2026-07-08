@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=v0627_sample_gan_coarse
+#SBATCH --job-name=sample_gan_fine
 #SBATCH --account=hdb
 #SBATCH --partition=gpu_standard
 #SBATCH --nodes=1
@@ -7,29 +7,29 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
-#SBATCH --time=02:00:00
-#SBATCH --output=v0627_sample_gan_coarse_%j.out
+#SBATCH --time=01:00:00
+#SBATCH --output=sample_gan_fine_%j.out
 
 module load cuda11
 module load anaconda
 
 PYTHON="$HOME/.conda/envs/to_gan/bin/python"
 
-SCRIPT="$HOME/TO_Gan/PoC_3d/v0627_gan_mdd_sampler.py"
+SCRIPT="$HOME/TO_Gan/PoC_3d/gan_mdd_sampler.py"
 
-DATA_FILE="/xdisk/hdb/emcdugald/v0627/train_data/gan/10000_gan_labeled_voxels_32x32x32_bcLoc-coarse_bcDofs-omit_loadLoc-coarse_loadDir-omit_low_mass_thr0.494781.npy"
-META_FILE="/xdisk/hdb/emcdugald/v0627/train_data/gan/10000_gan_labeled_voxels_32x32x32_bcLoc-coarse_bcDofs-omit_loadLoc-coarse_loadDir-omit_low_mass_thr0.494781_meta.npz"
+DATA_FILE="/xdisk/hdb/emcdugald/train_data/gan/10000_gan_labeled_voxels_32x32x32_bcLoc-fine_bcDofs-fine_loadLoc-fine_loadDir-fine_low_mass_thr0.581024.npy"
+META_FILE="/xdisk/hdb/emcdugald/train_data/gan/10000_gan_labeled_voxels_32x32x32_bcLoc-fine_bcDofs-fine_loadLoc-fine_loadDir-fine_low_mass_thr0.581024_meta.npz"
 
-CKPT="/xdisk/hdb/emcdugald/v0627/checkpoints/gan/bcLoc-coarse_bcDofs-omit_loadLoc-coarse_loadDir-omit_massLabel_low_mass_epochs500_bs32_nz512_ngf256_ndf128_nsamp10000_lrD5e-05_lrG5e-05_smoothR0.05_dEvery5_div0.01_coarse_run_20260628-222403/ckpt_best.pt"
+CKPT="/xdisk/hdb/emcdugald/checkpoints/gan/bcLoc-fine_bcDofs-fine_loadLoc-fine_loadDir-fine_massLabel_low_mass_epochs300_bs32_nz512_ngf256_ndf128_nsamp10000_lrD0.0001_lrG0.0001_smoothR0.07_dEvery5_div1_fine_run_20260706-184923/ckpt_step_26280.pt"
 
-OUTDIR="/xdisk/hdb/emcdugald/v0627/sampler_tests/gan_coarse_ckpt_best_20260630"
+OUTDIR="/xdisk/hdb/emcdugald/checkpoints/gan/bcLoc-fine_bcDofs-fine_loadLoc-fine_loadDir-fine_massLabel_low_mass_epochs300_bs32_nz512_ngf256_ndf128_nsamp10000_lrD0.0001_lrG0.0001_smoothR0.07_dEvery5_div1_fine_run_20260706-184923/gan_fine_ckpt_26280_4x4"
 DEVICE="cuda"
 
 NZ=512
 NGF=256
 NDF=128
-N_PER_COND=3
-N_RANDOM=2
+N_PER_COND=4
+N_RANDOM=4
 RNG_SEED=0
 
 mkdir -p "$OUTDIR"
@@ -44,7 +44,7 @@ echo "data file: $DATA_FILE"
 echo "meta file: $META_FILE"
 echo "checkpoint: $CKPT"
 echo "outdir: $OUTDIR"
-echo "mode: gan nonunet coarse"
+echo "mode: gan nonunet fine"
 
 $PYTHON "$SCRIPT" \
   --arch nonunet \

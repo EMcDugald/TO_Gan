@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=v0627_unet_gan_mdd_coarse
+#SBATCH --job-name=unet_gan_mdd_coarse
 #SBATCH --account=hdb
 #SBATCH --partition=gpu_standard
 #SBATCH --nodes=1
@@ -8,7 +8,7 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=03:00:00
-#SBATCH --output=v0627_unet_gan_mdd_coarse_%j.out
+#SBATCH --output=unet_gan_mdd_coarse_%j.out
 
 module load cuda11
 module load anaconda
@@ -18,10 +18,10 @@ PYTHON="$HOME/.conda/envs/to_gan/bin/python"
 # -------------------------
 # Paths and dataset choice
 # -------------------------
-DATA_FILE="/xdisk/hdb/emcdugald/v0627/train_data/gan/10000_gan_labeled_voxels_32x32x32_bcLoc-coarse_bcDofs-omit_loadLoc-coarse_loadDir-omit_low_mass_thr0.494781.npy"
+DATA_FILE="/xdisk/hdb/emcdugald/train_data/gan/10000_gan_labeled_voxels_32x32x32_bcLoc-coarse_bcDofs-omit_loadLoc-coarse_loadDir-omit_low_mass_thr0.581024.npy"
 
-CKPT_ROOT="/xdisk/hdb/emcdugald/v0627/checkpoints/gan_unet"
-SCRIPT="$HOME/TO_Gan/PoC_3d/v0627_gan_mdd_unet_trainer.py"
+CKPT_ROOT="/xdisk/hdb/emcdugald/checkpoints/gan_unet"
+SCRIPT="$HOME/TO_Gan/PoC_3d/gan_mdd_unet_trainer.py"
 
 TAG="coarse_run"
 DEVICE="cuda"

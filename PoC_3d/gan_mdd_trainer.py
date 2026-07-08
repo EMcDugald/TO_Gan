@@ -760,7 +760,7 @@ def get_mass_meta(meta):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train v0627 non-UNet 3D GAN-MDD on BC/load-conditioned, mass-labeled voxel data.')
+    parser = argparse.ArgumentParser(description='Train non-UNet 3D GAN-MDD on BC/load-conditioned, mass-labeled voxel data.')
     parser.add_argument('--data-path', type=str, required=True)
     parser.add_argument('--meta-path', type=str, default=None)
     parser.add_argument('--checkpoint-root', type=str, required=True)

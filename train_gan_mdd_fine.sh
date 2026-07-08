@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
-#SBATCH --time=03:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=gan_mdd_fine_%j.out
 
 module load cuda11
@@ -25,11 +25,11 @@ SCRIPT="$HOME/TO_Gan/PoC_3d/gan_mdd_trainer.py"
 TAG="fine_run"
 DEVICE="cuda"
 
-BATCH_SIZE=32
-N_EPOCHS=300
+BATCH_SIZE=16
+N_EPOCHS=500
 NZ=512
-NGF=256
-NDF=128
+NGF=512
+NDF=256
 LR_D=1e-4
 LR_G=1e-4
 SMOOTH_REAL=0.07

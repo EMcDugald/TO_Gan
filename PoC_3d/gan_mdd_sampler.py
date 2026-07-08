@@ -15,7 +15,7 @@ THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(THIS_DIR)
 
 # If trainers live elsewhere, update these sys.path inserts.
-sys.path.insert(0, THIS_DIR)      # e.g. v0627_sampler.py + trainers in same dir
+sys.path.insert(0, THIS_DIR)      # e.g. sampler.py + trainers in same dir
 sys.path.insert(0, REPO_ROOT)     # repo root if needed
 
 # Trainer module names — change if your files differ
@@ -236,7 +236,7 @@ def summarize_fake_mass_from_bin(batch_bin_np, meta):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Sample v0627 3D GAN-MDD checkpoints (non-UNet or UNet) on BC/load-conditioned voxel data."
+        description="Sample 3D GAN-MDD checkpoints (non-UNet or UNet) on BC/load-conditioned voxel data."
     )
 
     parser.add_argument("--arch", type=str, choices=["nonunet", "unet"], required=True,

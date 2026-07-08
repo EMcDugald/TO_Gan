@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=v0627_diff_coarse
+#SBATCH --job-name=diff_coarse
 #SBATCH --account=hdb
 #SBATCH --partition=gpu_standard
 #SBATCH --nodes=1
@@ -8,15 +8,15 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=03:00:00
-#SBATCH --output=v0627_diff_coarse_%j.out
+#SBATCH --output=diff_coarse_%j.out
 
 module load cuda11
 module load anaconda
 
 PYTHON="$HOME/.conda/envs/to_gan/bin/python"
-SCRIPT="$HOME/TO_Gan/PoC_3d/v0627_diffusion_trainer.py"
-DATA_FILE="/xdisk/hdb/emcdugald/v0627/train_data/diffusion/10000_diffusion_condLabel_voxels_32x32x32_bcLoc-coarse_bcDofs-omit_loadLoc-coarse_loadDir-omit_low_mass_thr0.494781.npy"
-LOG_ROOT="/xdisk/hdb/emcdugald/v0627/checkpoints/diffusion"
+SCRIPT="$HOME/TO_Gan/PoC_3d/diffusion_trainer.py"
+DATA_FILE="/xdisk/hdb/emcdugald/train_data/diffusion/10000_diffusion_condLabel_voxels_32x32x32_bcLoc-coarse_bcDofs-omit_loadLoc-coarse_loadDir-omit_low_mass_thr0.581024.npy"
+LOG_ROOT="/xdisk/hdb/emcdugald/checkpoints/diffusion"
 DEVICE="cuda"
 
 BATCHSIZE=4
