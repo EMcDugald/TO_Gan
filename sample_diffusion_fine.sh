@@ -22,7 +22,7 @@ META_FILE="/xdisk/hdb/emcdugald/train_data/diffusion/10000_diffusion_condLabel_v
 
 CKPT="/xdisk/hdb/emcdugald/checkpoints/diffusion/bcLoc-fine_bcDofs-fine_loadLoc-fine_loadDir-fine_massLabel-low_mass_mode-X0_epochs-300_bs-4_c1-32_c2-64_c3-128_20260706-184422/checkpoints/ckpt_best.pth"
 
-OUTDIR="/xdisk/hdb/emcdugald/checkpoints/diffusion/bcLoc-fine_bcDofs-fine_loadLoc-fine_loadDir-fine_massLabel-low_mass_mode-X0_epochs-300_bs-4_c1-32_c2-64_c3-128_20260706-184422/diffusion_fine_ckpt_best_4x4"
+OUTDIR="/xdisk/hdb/emcdugald/checkpoints/diffusion/bcLoc-fine_bcDofs-fine_loadLoc-fine_loadDir-fine_massLabel-low_mass_mode-X0_epochs-300_bs-4_c1-32_c2-64_c3-128_20260706-184422/diffusion_fine_ckpt_best_4x4_no_indices"
 
 IMG_SIZE=32
 UNET_CH1=32

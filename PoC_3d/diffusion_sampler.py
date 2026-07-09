@@ -187,7 +187,7 @@ def select_indices_by_subset(y, sample_idx, n_random, rng_seed, subset="positive
             raise ValueError(f"sample_idx {sample_idx} is not in subset={subset}")
         selected = [int(sample_idx)]
         meta = {"selection_mode": single_mode, "rng_seed": None}
-        return selected, meta, allowed.tolist()
+        return selected, meta
 
     if n_random is None or n_random <= 0:
         raise ValueError("When --sample-idx is not used, --n-random must be positive")
@@ -199,7 +199,7 @@ def select_indices_by_subset(y, sample_idx, n_random, rng_seed, subset="positive
         "selection_mode": random_mode,
         "rng_seed": int(rng_seed),
     }
-    return picks, meta, allowed.tolist()
+    return picks, meta
 
 
 # -------------------------------------------------------------------------
@@ -287,11 +287,9 @@ def run_diffusion_sampler(
     score_model.eval()
 
     # Selection (positive-only by default, but can be 'all')
-    selected_indices, selection_meta, subset_indices_full = select_indices_by_subset(
-        y, sample_idx, n_random, rng_seed, subset=subset
-    )
+    selected_indices, selection_meta = select_indices_by_subset(
+        y, sample_idx, n_random, rng_seed, subset=subset)
     print(f"[diffusion-sampler] selected indices (subset={subset}): {selected_indices}")
-    print(f"[diffusion-sampler] subset size: {len(subset_indices_full)}")
 
     # Conditioning spec + cond_slices + label_mode (same logic as trainer)
     if "conditioning_spec_json" in meta:
@@ -329,7 +327,6 @@ def run_diffusion_sampler(
             "selected_sample_indices": [int(i) for i in selected_indices],
             "num_selected": len(selected_indices),
             "subset_type": subset,
-            "subset_indices": subset_indices_full,
         },
         "dataset_metadata": {
             "cond_dim": int(cond_dim),
