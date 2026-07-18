@@ -235,3 +235,20 @@ python v0627_visualize_train_data.py \
   --positive-if low_mass \
   --rng-seed 0 \
   --mass-quantile 0.70
+
+
+
+
+  ##### WITH VFS ADDED TO CONDITIONING #####
+
+    python v0709_make_train_data_diffusion.py \
+  --data-root /home/u26/emcdugald/TO_Gan/TO_3D_data_scratch/data \
+  --outdir /xdisk/hdb/emcdugald/train_data/diffusion_VF \
+  --shape 32 32 32 \
+  --n-samples 10000 \
+  --conditioning-spec "bc_locations=fine,bc_dofs=fine,load_location=fine,load_direction=fine" \
+  --n-spatial-bins 10 \
+  --positive-if low_mass \
+  --rng-seed 0 \
+  --mass-quantile 0.70 \
+  --vf-mode append_to_condition

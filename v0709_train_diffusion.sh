@@ -1,0 +1,95 @@
+#!/bin/bash
+#SBATCH --job-name=diff_v0709_fine_all
+#SBATCH --account=hdb
+#SBATCH --partition=gpu_standard
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
+#SBATCH --gres=gpu:1
+#SBATCH --time=03:00:00
+#SBATCH --output=diff_v0709_fine_all_%j.out
+
+module load cuda11
+module load anaconda
+
+PYTHON="$HOME/.conda/envs/to_gan/bin/python"
+SCRIPT="$HOME/TO_Gan/PoC_3d/v0709_diffusion_trainer.py"
+
+DATA_FILE="/xdisk/hdb/emcdugald/train_data/diffusion_VF/10000_diffusion_condLabelVF_voxels_32x32x32_bcLoc-fine_bcDofs-fine_loadLoc-fine_loadDir-fine_low_mass_thr0.581024.npy"
+META_PATH="${DATA_FILE%.npy}_meta.npz"
+
+LOG_ROOT="/xdisk/hdb/emcdugald/checkpoints/diffusion_VF"
+DEVICE="cuda"
+
+BATCHSIZE=4
+NEPOCHS=1000
+LR=5e-5
+UNET_CH1=16
+UNET_CH2=32
+UNET_CH3=64
+T_EMBED_DIM=64
+COND_EMBED_DIM=64
+COND_CH=8
+COND_DROP_PROB=0.0
+MODE="X0"
+LOSS_WEIGHTING="Simple"
+IMG_SIZE=32
+NSAMPLES=0
+VAL_FRAC=0.1
+SAVE_EVERY=50
+SAMPLE_EVERY=50
+SAMPLE_NUM=4
+EMA_DECAY=0.9999
+SAMPLE_ATOL=1e-4
+SAMPLE_RTOL=1e-4
+SAMPLE_EPS=1e-3
+NUM_WORKERS=4
+SEED=42
+TRAIN_SUBSET="all"
+TAG="fine_all_vf_poc"
+
+mkdir -p "$LOG_ROOT"
+
+echo "which python: $PYTHON"
+$PYTHON -c "import sys; print('sys.executable:', sys.executable)"
+$PYTHON -c "import torch; print('torch version in job:', torch.__version__)"
+$PYTHON -c "import torch; print('CUDA available:', torch.cuda.is_available(), 'GPUs:', torch.cuda.device_count())"
+
+echo "script: $SCRIPT"
+echo "data file: $DATA_FILE"
+echo "meta path: $META_PATH"
+echo "log root: $LOG_ROOT"
+echo "train subset: $TRAIN_SUBSET"
+
+$PYTHON "$SCRIPT" \
+  --device "$DEVICE" \
+  --seed $SEED \
+  --batchsize $BATCHSIZE \
+  --nepochs $NEPOCHS \
+  --lr $LR \
+  --unet_ch1_dim $UNET_CH1 \
+  --unet_ch2_dim $UNET_CH2 \
+  --unet_ch3_dim $UNET_CH3 \
+  --t_embed_dim $T_EMBED_DIM \
+  --cond_embed_dim $COND_EMBED_DIM \
+  --cond_ch $COND_CH \
+  --cond_drop_prob $COND_DROP_PROB \
+  --mode "$MODE" \
+  --loss_weighting "$LOSS_WEIGHTING" \
+  --data_file "$DATA_FILE" \
+  --meta_path "$META_PATH" \
+  --img_size $IMG_SIZE \
+  --nsamples $NSAMPLES \
+  --val_frac $VAL_FRAC \
+  --log_root "$LOG_ROOT" \
+  --save_every_n_epochs $SAVE_EVERY \
+  --sample_every_n_epochs $SAMPLE_EVERY \
+  --sample_num $SAMPLE_NUM \
+  --ema_decay $EMA_DECAY \
+  --sample_atol $SAMPLE_ATOL \
+  --sample_rtol $SAMPLE_RTOL \
+  --sample_eps $SAMPLE_EPS \
+  --num_workers $NUM_WORKERS \
+  --train_subset "$TRAIN_SUBSET" \
+  --tag "$TAG"
