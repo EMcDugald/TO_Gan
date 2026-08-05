@@ -4,11 +4,19 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-TARGET_SHAPE = (32, 32, 32)
+# -------------------------------------------------------------------------
+# Basic constants
+# -------------------------------------------------------------------------
+
 N_SPATIAL_BINS = 10
 
 
+# -------------------------------------------------------------------------
+# Helpers copied/adapted from existing utils
+# -------------------------------------------------------------------------
+
 def mass_fraction(voxel_arr):
+    """Binary occupancy fraction (still useful for diagnostics)."""
     return float((voxel_arr > 0).astype(np.float32).mean())
 
 
@@ -84,6 +92,39 @@ def pad_array_rows(arr, max_rows, n_cols):
     return out, mask, n
 
 
+# -------------------------------------------------------------------------
+# Conditioning spec parsing
+# -------------------------------------------------------------------------
+
+def parse_conditioning_spec(spec_str):
+    tokens = [tok.strip() for tok in spec_str.split(",") if tok.strip()]
+    spec = {
+        "bc_locations": "coarse",
+        "bc_dofs": "omit",
+        "load_location": "coarse",
+        "load_direction": "omit",
+    }
+    for tok in tokens:
+        key, val = [x.strip() for x in tok.split("=", 1)]
+        if key not in spec:
+            raise ValueError(f"Unknown conditioning spec key: {key}")
+        spec[key] = val
+    return spec
+
+
+def conditioning_spec_to_string(spec):
+    return ",".join([
+        f"bc_locations={spec['bc_locations']}",
+        f"bc_dofs={spec['bc_dofs']}",
+        f"load_location={spec['load_location']}",
+        f"load_direction={spec['load_direction']}",
+    ])
+
+
+# -------------------------------------------------------------------------
+# Condition vector construction (BC/load -> cond_vec)
+# -------------------------------------------------------------------------
+
 def build_condition_vector(
     bc_arr,
     load_arr,
@@ -117,6 +158,7 @@ def build_condition_vector(
     load_loc_mode = conditioning_spec["load_location"]
     load_dir_mode = conditioning_spec["load_direction"]
 
+    # BC locations
     if bc_loc_mode == "fine":
         add_part("bc_points", bc_pts_pad.reshape(-1))
         add_part("bc_mask", bc_mask)
@@ -142,11 +184,13 @@ def build_condition_vector(
     elif bc_loc_mode != "omit":
         raise ValueError(f"Unknown bc_locations mode: {bc_loc_mode}")
 
+    # BC DOFs
     if bc_dof_mode == "fine":
         add_part("bc_dofs", bc_dofs_pad.reshape(-1))
     elif bc_dof_mode != "omit":
         raise ValueError(f"Unknown bc_dofs mode: {bc_dof_mode}")
 
+    # Load location
     if load_loc_mode == "fine":
         add_part("load_point", load_pt)
     elif load_loc_mode == "coarse":
@@ -159,6 +203,7 @@ def build_condition_vector(
     elif load_loc_mode != "omit":
         raise ValueError(f"Unknown load_location mode: {load_loc_mode}")
 
+    # Load direction
     if load_dir_mode == "fine":
         add_part("load_dir", load_vec)
     elif load_dir_mode != "omit":
@@ -227,94 +272,12 @@ def make_condition_string(conditioning_spec, aux, spatial_edges):
     return "_".join(parts)
 
 
-def save_mass_histogram_png(mass_values, cutoff, cutoff_method, png_path, hist_counts=None, hist_edges=None, smooth_counts=None):
-    vals = np.asarray(mass_values, dtype=np.float64)
-    fig, ax = plt.subplots(figsize=(8, 5))
+# -------------------------------------------------------------------------
+# Dataset generation for neural fields (mixed shapes)
+# -------------------------------------------------------------------------
 
-    if hist_edges is not None:
-        ax.hist(vals, bins=hist_edges, color='steelblue', alpha=0.65, edgecolor='black')
-    else:
-        ax.hist(vals, bins=128, color='steelblue', alpha=0.65, edgecolor='black')
-
-    if hist_counts is not None and hist_edges is not None and smooth_counts is not None:
-        centers = 0.5 * (hist_edges[:-1] + hist_edges[1:])
-        ax.plot(centers, smooth_counts, color='darkorange', linewidth=2, label='Smoothed histogram')
-
-    ax.axvline(cutoff, color='crimson', linestyle='--', linewidth=2, label=f'Threshold = {cutoff:.6f}')
-    ax.set_title(f'Mass distribution ({cutoff_method})')
-    ax.set_xlabel('Mass fraction')
-    ax.set_ylabel('Count')
-    ax.legend()
-    ax.grid(alpha=0.2)
-
-    fig.tight_layout()
-    fig.savefig(png_path, dpi=200, bbox_inches='tight')
-    plt.close(fig)
-
-
-def find_mass_threshold_valley(mass_values, n_bins=128, min_peak_frac=0.05):
-    vals = np.asarray(mass_values, dtype=np.float64)
-    hist, edges = np.histogram(vals, bins=n_bins)
-    smooth = hist.astype(np.float64).copy()
-    if len(smooth) >= 3:
-        kernel = np.array([1, 2, 3, 2, 1], dtype=np.float64)
-        kernel = kernel / kernel.sum()
-        smooth = np.convolve(smooth, kernel, mode='same')
-
-    peaks = []
-    for i in range(1, len(smooth) - 1):
-        if smooth[i] >= smooth[i - 1] and smooth[i] >= smooth[i + 1]:
-            peaks.append(i)
-
-    if len(peaks) < 2:
-        thr = float(np.median(vals))
-        return thr, 'median_fallback', hist, edges, smooth
-
-    peak_heights = np.array([smooth[i] for i in peaks])
-    max_h = peak_heights.max() if len(peak_heights) else 0.0
-    valid_peaks = [p for p in peaks if smooth[p] >= min_peak_frac * max_h]
-    if len(valid_peaks) < 2:
-        valid_peaks = sorted(peaks, key=lambda i: smooth[i], reverse=True)[:2]
-    else:
-        valid_peaks = sorted(valid_peaks, key=lambda i: smooth[i], reverse=True)[:2]
-
-    p1, p2 = sorted(valid_peaks[:2])
-    if p2 <= p1 + 1:
-        thr = float(np.median(vals))
-        return thr, 'median_adjacent_peak_fallback', hist, edges, smooth
-
-    valley_idx = p1 + int(np.argmin(smooth[p1:p2 + 1]))
-    thr = float(0.5 * (edges[valley_idx] + edges[valley_idx + 1]))
-    return thr, 'valley_between_two_main_modes', hist, edges, smooth
-
-
-def parse_conditioning_spec(spec_str):
-    tokens = [tok.strip() for tok in spec_str.split(",") if tok.strip()]
-    spec = {
-        "bc_locations": "coarse",
-        "bc_dofs": "omit",
-        "load_location": "coarse",
-        "load_direction": "omit",
-    }
-    for tok in tokens:
-        key, val = [x.strip() for x in tok.split("=", 1)]
-        if key not in spec:
-            raise ValueError(f"Unknown conditioning spec key: {key}")
-        spec[key] = val
-    return spec
-
-
-def conditioning_spec_to_string(spec):
-    return ",".join([
-        f"bc_locations={spec['bc_locations']}",
-        f"bc_dofs={spec['bc_dofs']}",
-        f"load_location={spec['load_location']}",
-        f"load_direction={spec['load_direction']}",
-    ])
-
-
-def generate_dataset_common(
-    shape_tuple,
+def generate_dataset_mixed_shapes(
+    shapes_filter,
     n_samples,
     topo,
     shapes,
@@ -323,27 +286,46 @@ def generate_dataset_common(
     vfs,
     outdir,
     conditioning_spec,
-    positive_if,
     rng_seed,
-    mass_quantile,
     n_spatial_bins,
-    label_mode,
-    vf_mode="omit",
+    vf_mode="append_to_condition",
+    include_shape_in_cond=True,
 ):
-    indices = [i for i, shp in enumerate(shapes) if tuple(np.asarray(shp).tolist()) == tuple(shape_tuple)]
+    """
+    Build a dataset for neural-field training with mixed part shapes.
+    Each entry: (voxel_arr, cond_vec, label_dummy, cond_str, sample_info).
+    - voxel_arr: binary/int8 voxel grid with shape (Nx, Ny, Nz).
+    - cond_vec: BC/load cond + optional VF + optional normalized shape tuple.
+    - label_dummy: integer (0) placeholder.
+    - cond_str: human-readable conditioning string.
+    - sample_info: dict with part_shape, mass_fraction, volume_fraction, etc.
+    """
+
+    all_shapes = [tuple(np.asarray(shp).tolist()) for shp in shapes]
+
+    # Select indices based on optional shapes_filter
+    if shapes_filter is None:
+        indices = list(range(len(shapes)))
+    else:
+        allowed = set(tuple(s) for s in shapes_filter)
+        indices = [i for i, shp in enumerate(all_shapes) if shp in allowed]
+
     if not indices:
-        raise ValueError(f'No samples found with shape {shape_tuple}')
-    
+        raise ValueError("No samples found for the requested shapes")
+
     vfs = np.asarray(vfs, dtype=np.float64).reshape(-1)
 
-    print(f'Found {len(indices)} total entries with shape {shape_tuple}')
+    unique_shapes = sorted(set(all_shapes[i] for i in indices))
+    print(f"Found {len(indices)} total entries with shapes {unique_shapes}")
 
+    # Gather mass + BC/load info for spatial edges
     all_mass_fracs = []
     all_bc_pts = []
     all_load_pts = []
     bc_counts = []
 
     for i in indices:
+        shape_tuple = tuple(all_shapes[i])
         voxel_arr = np.asarray(topo[i]).astype(np.float32).reshape(shape_tuple)
         all_mass_fracs.append(mass_fraction(voxel_arr))
         bc_pts = parse_bc_points(bcs[i])
@@ -362,18 +344,6 @@ def generate_dataset_common(
     xyz_all = np.concatenate([bc_all, load_all], axis=0)
     spatial_edges = tuple(compute_quantile_edges(xyz_all[:, ax], n_spatial_bins) for ax in range(3))
 
-    if mass_quantile is not None:
-        cutoff = float(np.quantile(all_mass_fracs, mass_quantile))
-        cutoff_method = f'user_quantile_{mass_quantile:.4f}'
-        hist, hist_edges = np.histogram(all_mass_fracs, bins=128)
-        smooth = hist.astype(np.float64).copy()
-        if len(smooth) >= 3:
-            kernel = np.array([1, 2, 3, 2, 1], dtype=np.float64)
-            kernel = kernel / kernel.sum()
-            smooth = np.convolve(smooth, kernel, mode='same')
-    else:
-        cutoff, cutoff_method, hist, hist_edges, smooth = find_mass_threshold_valley(all_mass_fracs)
-
     os.makedirs(outdir, exist_ok=True)
 
     spec_str = conditioning_spec_to_string(conditioning_spec)
@@ -384,43 +354,21 @@ def generate_dataset_common(
         f"loadDir-{conditioning_spec['load_direction']}"
     )
 
-    hist_png_name = (
-        f"mass_hist_{shape_tuple[0]}x{shape_tuple[1]}x{shape_tuple[2]}_"
-        f"{spec_slug}_{positive_if}_thr{cutoff:.6f}.png"
-    )
-    hist_png_path = os.path.join(outdir, hist_png_name)
-
-    save_mass_histogram_png(
-        mass_values=all_mass_fracs,
-        cutoff=cutoff,
-        cutoff_method=cutoff_method,
-        png_path=hist_png_path,
-        hist_counts=hist,
-        hist_edges=hist_edges,
-        smooth_counts=smooth,
-    )
-
-    if len(indices) < n_samples:
+    # Random subset of indices
+    rng = np.random.default_rng(rng_seed)
+    if len(indices) <= n_samples:
         selected = indices
     else:
-        rng = np.random.default_rng(rng_seed)
         selected = list(rng.choice(indices, size=n_samples, replace=False))
 
     results = []
-    labels_list = []
     example_slices = None
 
     for idx in selected:
+        shape_tuple = tuple(all_shapes[idx])
         voxel_arr = np.asarray(topo[idx]).astype(np.int8).reshape(shape_tuple)
         mfrac = mass_fraction(voxel_arr)
         vf_val = float(vfs[idx])
-
-        if positive_if == 'low_mass':
-            label_val = 1 if mfrac <= cutoff else 0
-        elif positive_if == 'high_mass':
-            label_val = 1 if mfrac >= cutoff else 0
-        else:
-            raise ValueError("positive_if must be 'low_mass' or 'high_mass'")
 
         cond_vec, aux = build_condition_vector(
             bc_arr=bcs[idx],
@@ -430,18 +378,52 @@ def generate_dataset_common(
             max_bc_points=max_bc_points,
         )
 
+
+    # results = []
+    # example_slices = None
+
+    # for idx in selected:
+    #     shape_tuple = tuple(all_shapes[idx])
+    #     voxel_arr = np.asarray(topo[idx]).astype(np.int8).reshape(shape_tuple)
+    #     mfrac = mass_fraction(voxel_arr)
+    #     vf_val = float(vfs[idx])
+
+    #     # --- NEW: normalize BC/load coordinates by max(shape_tuple) ---
+    #     Nx, Ny, Nz = shape_tuple
+    #     max_dim = float(max(Nx, Ny, Nz))  # length scale from shape tuple
+
+    #     bc_arr_raw = np.asarray(bcs[idx], dtype=np.float64)
+    #     load_arr_raw = np.asarray(loads[idx], dtype=np.float64)
+    #     if load_arr_raw.ndim == 3:
+    #         load_arr_raw = load_arr_raw[0]
+
+    #     # Extract raw coordinate parts
+    #     bc_pts_raw = bc_arr_raw[:, :3]      # (N_bc, 3)
+    #     load_pt_raw = load_arr_raw[0, :3]   # (3,)
+
+    #     if max_dim > 0.0:
+    #         bc_arr_norm = bc_arr_raw.copy()
+    #         bc_arr_norm[:, :3] = bc_pts_raw / max_dim
+    #         load_arr_norm = load_arr_raw.copy()
+    #         load_arr_norm[0, :3] = load_pt_raw / max_dim
+    #     else:
+    #         bc_arr_norm = bc_arr_raw
+    #         load_arr_norm = load_arr_raw
+    #     # --- end normalization block ---
+
+    #     # Build cond_vec from *normalized* BC/load arrays
+    #     cond_vec, aux = build_condition_vector(
+    #         bc_arr=bc_arr_norm,
+    #         load_arr=load_arr_norm,
+    #         conditioning_spec=conditioning_spec,
+    #         spatial_edges=spatial_edges,
+    #         max_bc_points=max_bc_points,
+    #     )
+
         slices = dict(aux["slices"])
         next_pos = len(cond_vec)
 
-        if label_mode == "append_to_condition":
-            cond_vec = np.concatenate(
-                [cond_vec, np.array([float(label_val)], dtype=np.float32)]
-            ).astype(np.float32)
-            slices["label"] = (next_pos, next_pos + 1)
-            next_pos += 1
-        elif label_mode != "omit":
-            raise ValueError("label_mode must be 'omit' or 'append_to_condition'")
-
+        # Append volume fraction as scalar conditioning
         if vf_mode == "append_to_condition":
             cond_vec = np.concatenate(
                 [cond_vec, np.array([vf_val], dtype=np.float32)]
@@ -451,39 +433,39 @@ def generate_dataset_common(
         elif vf_mode != "omit":
             raise ValueError("vf_mode must be 'omit' or 'append_to_condition'")
 
+        # Append normalized shape tuple (Nx, Ny, Nz) as conditioning
+        if include_shape_in_cond:
+            shape_arr = np.asarray(shape_tuple, dtype=np.float32)
+            max_dim = float(shape_arr.max())
+            shape_norm = shape_arr / max_dim if max_dim > 0 else shape_arr
+            cond_vec = np.concatenate([cond_vec, shape_norm]).astype(np.float32)
+            slices["shape_tuple"] = (next_pos, next_pos + 3)
+            next_pos += 3
+
         cond_str = make_condition_string(conditioning_spec, aux, spatial_edges)
-        if label_mode == "append_to_condition":
-            cond_str = f"label_{label_val}_" + cond_str
-        if vf_mode == "append_to_condition":
-            cond_str = f"{cond_str}_vf_{vf_val:.6f}"
+        cond_str = f"{cond_str}_vf_{vf_val:.6f}"
+        cond_str = f"{cond_str}_shape_{shape_tuple[0]}x{shape_tuple[1]}x{shape_tuple[2]}"
 
         sample_info = {
             "source_index": int(idx),
-            "part_shape": np.asarray(shapes[idx], dtype=np.int32),
+            "part_shape": np.asarray(shape_tuple, dtype=np.int32),
             "bc_count": int(aux["bc_count"]),
             "mass_fraction": float(mfrac),
             "volume_fraction": vf_val,
         }
 
-        results.append((voxel_arr, cond_vec, int(label_val), cond_str, sample_info))
-        labels_list.append(label_val)
+        # Dummy label = 0 (neural field is supervised point-wise, not via mass class)
+        results.append((voxel_arr, cond_vec, int(0), cond_str, sample_info))
 
         if example_slices is None:
             example_slices = dict(slices)
 
-    n_pos = int(sum(labels_list))
-    n_neg = int(len(labels_list) - n_pos)
-
     return {
         "results": results,
-        "n_pos": n_pos,
-        "n_neg": n_neg,
-        "cutoff": float(cutoff),
-        "cutoff_method": cutoff_method,
-        "hist": hist,
-        "hist_edges": hist_edges,
-        "smooth": smooth,
-        "hist_png_path": hist_png_path,
+        "hist": None,
+        "hist_edges": None,
+        "smooth": None,
+        "hist_png_path": None,
         "selected": selected,
         "indices": indices,
         "max_bc_points": max_bc_points,
@@ -494,31 +476,35 @@ def generate_dataset_common(
         "conditioning_spec_str": spec_str,
         "conditioning_spec_slug": spec_slug,
         "example_slices": example_slices if example_slices is not None else {},
-        "label_mode": label_mode,
         "vf_mode": vf_mode,
     }
 
 
-def save_dataset_and_meta(
+# -------------------------------------------------------------------------
+# Saving dataset + meta for neural fields
+# -------------------------------------------------------------------------
+
+def save_dataset_and_meta_neural(
     payload,
     outdir,
-    shape_tuple,
-    positive_if,
     rng_seed,
-    mass_quantile,
     n_spatial_bins,
     file_prefix,
 ):
     results = payload["results"]
-    cutoff = payload["cutoff"]
     spec_slug = payload["conditioning_spec_slug"]
-    label_mode = payload["label_mode"]
+    vf_mode = payload["vf_mode"]
+
+    # Summarize shapes for naming
+    part_shapes = [tuple(r[4]["part_shape"].tolist()) for r in results]
+    unique_shapes = sorted(set(part_shapes))
+    shapes_str = "_".join(f"{sx}x{sy}x{sz}" for (sx, sy, sz) in unique_shapes)
 
     fname = (
         f"{len(results)}_{file_prefix}_"
-        f"{shape_tuple[0]}x{shape_tuple[1]}x{shape_tuple[2]}_"
+        f"shapes-{shapes_str}_"
         f"{spec_slug}_"
-        f"{positive_if}_thr{cutoff:.6f}.npy"
+        f"vfmode-{vf_mode}.npy"
     )
     data_path = os.path.join(outdir, fname)
     np.save(data_path, np.array(results, dtype=object))
@@ -528,38 +514,21 @@ def save_dataset_and_meta(
 
     np.savez(
         meta_path,
-        mass_cutoff_value=float(payload["cutoff"]),
-        mass_cutoff_method=payload["cutoff_method"],
-        positive_if=str(positive_if),
         conditioning_spec_json=json.dumps(payload["conditioning_spec"]),
         conditioning_spec_str=payload["conditioning_spec_str"],
         bc_locations_mode=str(payload["conditioning_spec"]["bc_locations"]),
         bc_dofs_mode=str(payload["conditioning_spec"]["bc_dofs"]),
         load_location_mode=str(payload["conditioning_spec"]["load_location"]),
         load_direction_mode=str(payload["conditioning_spec"]["load_direction"]),
-        label_mode=str(label_mode),
-        vf_mode=str(payload["vf_mode"]),
+        vf_mode=str(vf_mode),
         spatial_bin_edges_x=np.asarray(payload["spatial_edges"][0], dtype=np.float64),
         spatial_bin_edges_y=np.asarray(payload["spatial_edges"][1], dtype=np.float64),
         spatial_bin_edges_z=np.asarray(payload["spatial_edges"][2], dtype=np.float64),
         n_spatial_bins=int(n_spatial_bins),
-        target_shape=np.array(shape_tuple, dtype=int),
-        n_total_shape_matches=int(len(payload["indices"])),
-        n_selected=int(len(payload["selected"])),
-        n_positive=int(payload["n_pos"]),
-        n_negative=int(payload["n_neg"]),
-        rng_seed=int(rng_seed),
-        bc_count_min=int(payload["min_bc_points"]),
-        bc_count_max=int(payload["max_bc_points"]),
-        bc_count_unique=np.array(payload["unique_bc_counts"], dtype=int),
-        cond_dim=int(len(results[0][1])) if len(results) > 0 else -1,
+        unique_shapes=np.asarray(unique_shapes, dtype=int),
         cond_slices_json=json.dumps(payload["example_slices"]),
-        mass_hist_counts=np.asarray(payload["hist"], dtype=np.int64),
-        mass_hist_edges=np.asarray(payload["hist_edges"], dtype=np.float64),
-        mass_hist_smooth=np.asarray(payload["smooth"], dtype=np.float64),
-        mass_hist_png=str(payload["hist_png_path"]),
-        mass_quantile=np.nan if mass_quantile is None else float(mass_quantile),
-        mass_threshold_source='user_quantile' if mass_quantile is not None else 'auto_valley',
+        cond_dim=int(len(results[0][1])) if len(results) > 0 else -1,
+        rng_seed=int(rng_seed),
     )
 
     print(f"Saved {len(results)} samples")
