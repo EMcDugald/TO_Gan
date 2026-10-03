@@ -102,7 +102,7 @@ MANUF_OVERRIDE_PERCENTILE="${MANUF_OVERRIDE_PERCENTILE:-}"
 MANUF_OVERRIDE_RAW_VALUE="${MANUF_OVERRIDE_RAW_VALUE:-}"
 MANUFACTURABILITY_CSV="${MANUFACTURABILITY_CSV:-$HOME/TO_Gan/TO_3D_data_scratch/data/summary.csv}"
 
-OUTDIR="${OUTDIR:-/xdisk/hdb/emcdugald/samples/masked_voxel_diff_manuf/model${MODEL_ID}_override-${MANUF_OVERRIDE}_w${GUIDANCE_SCALE}_seed${SEED}}_v5"
+OUTDIR="${OUTDIR:-/xdisk/hdb/emcdugald/samples/masked_voxel_diff_manuf/model${MODEL_ID}_override-${MANUF_OVERRIDE}_w${GUIDANCE_SCALE}_seed${SEED}}"
 mkdir -p "$OUTDIR"
 
 echo "which python: $PYTHON"
